@@ -1,21 +1,28 @@
 # GNN_FL_cf_mMIMO
 
-A Graph Neural Netowrk Federated Learning Apporach for Cell-Free Massive MIMO Communication 
+A Graph Neural Network Federated Learning Apporach for Cell-Free Massive MIMO Communication 
 
 ---
 
 ## Table of Contents
 
+- [Requirement](#requirements)
 - [Installation](#installation)
-<!-- - [Usage](#usage)
-- [Features](#features)
-- [Contributing](#contributing)
-- [License](#license) -->
+- [Citation](#citation)
 - [Contact](#contact)
 
+---
+## Requirements
+- CUDA 11.8
+- python=3.10
+- pytorch=2.0.1
+- torch-geometric=2.4.0
+
+```bash
+conda create -n env_name python=3.10 cudatoolkit=11.8 -y
+```
 
 ---
-
 ## Installation
 ### Clone repo
 
@@ -27,6 +34,9 @@ cd GNN_FL_cf_mMIMO
 ```bash
 pip install -r requirements.txt
 ```
+---
+## Citation
+Please cite my paper (To be update...)
 
 ---
 ## Contact

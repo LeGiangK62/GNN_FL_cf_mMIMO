@@ -46,19 +46,22 @@ class APConv(MessagePassing):
         return '{}(nn={})'.format(self.__class__.__name__, self.mlp1,self.mlp2)
 
 class APNet(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, node_dim=11, edge_dim=2, hidden_dim=32):
         super(APNet, self).__init__()
 
-        self.mlp1 = MLP([14, 16, 32]) # 14 = 2+12
-        self.mlp2 = MLP([44, 16]) # 43 = 32+12
-        self.mlp2 = Seq(*[self.mlp2,Seq(Lin(16, 1, bias = True), ReLU())]) #Sigmoid()
+        self.mlp1 = MLP([node_dim+edge_dim, hidden_dim, hidden_dim]) # 14 = 2+12
+        self.mlp2 = MLP([node_dim+hidden_dim, hidden_dim]) # 43 = 32+12
+        self.mlp2 = Seq(*[self.mlp2,Seq(Lin(hidden_dim, 1, bias = True), ReLU())]) #Sigmoid()
         self.conv = APConv(self.mlp1,self.mlp2)
+        
+        self.power = MLP([node_dim, hidden_dim, 1])
 
     def forward(self, data):
-        x0, edge_attr, edge_index = data.x, data.edge_attr, data.edge_index
-        x1 = self.conv(x = x0, edge_index = edge_index, edge_attr = edge_attr)
-        x2 = self.conv(x = x1, edge_index = edge_index, edge_attr = edge_attr)
-        out = self.conv(x = x2, edge_index = edge_index, edge_attr = edge_attr)
-        return out # out
+        x, edge_attr, edge_index = data.x, data.edge_attr, data.edge_index
+        x = self.conv(x = x, edge_index = edge_index, edge_attr = edge_attr)
+        x = self.conv(x = x, edge_index = edge_index, edge_attr = edge_attr)
+        x = self.conv(x = x, edge_index = edge_index, edge_attr = edge_attr)
+        out = self.power(x)
+        return out
     
     
