@@ -1,6 +1,7 @@
 import torch
 import copy
 import numpy as np
+from Utils.synthetic_graph import return_graph, combine_graph
 
 
 # Loss function
@@ -77,7 +78,7 @@ def sr_loss_matrix(data_trainn, out_trainn, K, M, sr_weight, nsu_weight, Rthr, t
 def max_min_loss_singleAP(data, power):
     return 1
 
-def loss_function(data_trainn, out_trainn, K, M, sr_weight, nsu_weight, Rthr, tau):
+def loss_function_old(data_trainn, out_trainn, K, M, sr_weight, nsu_weight, Rthr, tau):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     Ther_noise = 20000000 * 10**(-17.4) * 10**-3
     Pp = 1/Ther_noise
@@ -137,19 +138,20 @@ def loss_function(data_trainn, out_trainn, K, M, sr_weight, nsu_weight, Rthr, ta
 
 # 2. Training and Testing function
 
-def train(dataLoader, model, optimizer):
+def train(dataLoader, complementLoader, model, optimizer):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.train()
     
     total_loss = 0.0
     total_graphs = 0
-    for batch in dataLoader:
+    for batch, complement in zip(dataLoader, complementLoader):
         batch = batch.to(device)
+        complement = complement.to(device)
+        batch = combine_graph(batch, complement)
         num_graph = batch.num_graphs
         
-        power = model(batch.x, batch.edge_index, batch.edge_attr)
-        loss = loss_function(power, batch.edge_attr)
-        
+        x_dict, edge_dict, edge_index = model(batch)
+        loss = loss_function(batch, x_dict, edge_dict)
         loss.backward()
         optimizer.step()
         
@@ -160,19 +162,20 @@ def train(dataLoader, model, optimizer):
 
 
 @torch.no_grad()
-def eval(dataLoader, model):
+def eval(dataLoader, complementLoader, model):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.eval()
     
     total_loss = 0.0
     total_graphs = 0
-    for batch in dataLoader:
+    for batch, complement in zip(dataLoader, complementLoader):
         batch = batch.to(device)
+        complement = complement.to(device)
+        batch = combine_graph(batch, complement)
         num_graph = batch.num_graphs
         
-        power = model(batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict)
-        loss = loss_function(power, batch.edge_attr_dict)
-        
+        x_dict, edge_dict, edge_index = model(batch)
+        loss = loss_function(batch, x_dict, edge_dict)
         
         total_loss += loss.item() * num_graph
         total_graphs += num_graph
@@ -251,3 +254,7 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment):
     rate = torch.log2(1 + SINR_num/SINR_denom)
     return rate
 
+
+
+def loss_function(graphData, nodeFeatDict, edgeAttrDict):
+    return None

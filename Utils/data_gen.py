@@ -1,7 +1,7 @@
 import torch
 
 import numpy as np
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 # 1. Location & Channel generation
 def Generate_Input(num_H, tau, K, M, Pd, D=1, Hb=15, Hm=1.65, f=1900,
@@ -143,7 +143,8 @@ def create_graph(Beta_all, Phi_all):
     for each_AP in range(num_AP):
         data_single_AP = []
         for each_sample in range(num_sample):
-            data = single_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
+            data = single_het_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
+            # data = single_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
             data_single_AP.append(data)
         data_list.append(data_single_AP)
     return data_list 
@@ -167,5 +168,89 @@ def single_graph(beta_single_AP, phi_single_AP):
     
     
     data = Data(x=x, edge_index=edge_index.t().contiguous(),edge_attr = edge_attr)
+    return data
+
+
+
+def single_het_graph(beta_single_AP, phi_single_AP):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    beta_single_AP = beta_single_AP[:,np.newaxis]
+    num_UE = beta_single_AP.shape[0]
+    num_AP = 1
+
+    # Creating node features (random values for AP and UE nodes)
+    ap_features = np.random.rand(num_AP, 1)  # Random feature for AP node (dim 1)
+    ue_features = phi_single_AP  # Random feature for UE nodes (dim 1)
+
+    # Concatenate features for both AP and UE nodes
+    x_ap = torch.tensor(ap_features, dtype=torch.float).to(device)
+    x_ue = torch.tensor(ue_features, dtype=torch.float).to(device)
+
+    # Combine AP and UE node features
+    x = {'AP': x_ap, 'UE': x_ue}
+
+    # Define edges (connect AP to all UEs in a bipartite manner)
+    edge_index_ap_down_ue = []
+    edge_index_ue_up_ap = []
+
+    for ue_idx in range(num_UE):
+        edge_index_ap_down_ue.append([0, ue_idx])  # AP (0) to UE (ue_idx)
+        edge_index_ue_up_ap.append([ue_idx, 0])  # UE (ue_idx) to AP (0)
+
+    edge_index_ap_down_ue = torch.tensor(edge_index_ap_down_ue, dtype=torch.long).t().contiguous().to(device)
+    edge_index_ue_up_ap = torch.tensor(edge_index_ue_up_ap, dtype=torch.long).t().contiguous().to(device)
+    edge_attr_ap_to_ue = torch.tensor(beta_single_AP, dtype=torch.float).to(device)
+    edge_attr_ue_up_ap = torch.tensor(beta_single_AP, dtype=torch.float).to(device)
+
+    # Create the heterogeneous graph data
+    data = HeteroData()
+    data['AP'].x = x['AP']
+    data['UE'].x = x['UE']
+    data['AP', 'down', 'UE'].edge_index = edge_index_ap_down_ue
+    data['AP', 'down', 'UE'].edge_attr = edge_attr_ap_to_ue
+    data['UE', 'up', 'AP'].edge_index = edge_index_ue_up_ap
+    data['UE', 'up', 'AP'].edge_attr = edge_attr_ue_up_ap
+
+    return data
+
+
+def single_syn_het_graph(ap_feat, large_scale_feat):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    num_UE = large_scale_feat.shape[0]
+    num_AP = ap_feat.shape[0]
+
+    # Creating node features (random values for AP and UE nodes)
+    ap_features = ap_feat  # Random feature for AP node (dim 1)
+    ue_features = torch.rand(num_UE, 1)  # Random feature for UE nodes (dim 1)
+
+    # Concatenate features for both AP and UE nodes
+    x_ap = ap_features.to(torch.float).to(device)
+    x_ue = ue_features.to(torch.float).to(device)
+
+    # Combine AP and UE node features
+    x = {'AP': x_ap, 'UE': x_ue}
+
+    # Define edges (connect AP to all UEs in a bipartite manner)
+    edge_index_ap_down_ue = []
+    edge_index_ue_up_ap = []
+
+    for ue_idx in range(num_UE):
+        edge_index_ap_down_ue.append([0, ue_idx])  # AP (0) to UE (ue_idx)
+        edge_index_ue_up_ap.append([ue_idx, 0])  # UE (ue_idx) to AP (0)
+
+    edge_index_ap_down_ue = torch.tensor(edge_index_ap_down_ue, dtype=torch.long).t().contiguous().to(device)
+    edge_index_ue_up_ap = torch.tensor(edge_index_ue_up_ap, dtype=torch.long).t().contiguous().to(device)
+    edge_attr_ap_to_ue = large_scale_feat.to(dtype=torch.float).to(device)
+    edge_attr_ue_up_ap = large_scale_feat.to(dtype=torch.float).to(device)
+
+    # Create the heterogeneous graph data
+    data = HeteroData()
+    data['AP'].x = x['AP']
+    data['UE'].x = x['UE']
+    data['AP', 'down', 'UE'].edge_index = edge_index_ap_down_ue
+    data['AP', 'down', 'UE'].edge_attr = edge_attr_ap_to_ue
+    data['UE', 'up', 'AP'].edge_index = edge_index_ue_up_ap
+    data['UE', 'up', 'AP'].edge_attr = edge_attr_ue_up_ap
+
     return data
 
