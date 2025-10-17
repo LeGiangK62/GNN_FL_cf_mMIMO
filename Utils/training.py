@@ -186,20 +186,12 @@ def eval(dataLoader, complementLoader, model):
 # 3. Federated Learning
 
 def average_weights(local_weights):
-    """
-    Perform FedAvg: average model weights from all clients (APs).
-    local_weights: list of state_dicts from each local model.
-    Returns averaged state_dict.
-    """
-    # deep copy weights of first client
+    """Average model parameters from all clients (FedAvg)."""
     avg_weights = copy.deepcopy(local_weights[0])
-
-    # iterate over all keys
     for key in avg_weights.keys():
         for i in range(1, len(local_weights)):
             avg_weights[key] += local_weights[i][key]
         avg_weights[key] = torch.div(avg_weights[key], len(local_weights))
-
     return avg_weights
 
 
@@ -256,5 +248,213 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment):
 
 
 
-def loss_function(graphData, nodeFeatDict, edgeAttrDict):
-    return None
+def loss_function(graphData, nodeFeatDict, clientResponse, tau, rho_p, rho_d, num_antenna):
+    num_graphs = graphData.num_graphs
+    num_UEs = graphData['UE'].x.shape[0]//num_graphs
+    num_APs = graphData['AP'].x.shape[0]//num_graphs
+    
+    pilot_matrix = graphData['UE'].x.reshape(num_graphs, num_UEs, -1)
+    large_scale = graphData['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
+
+    power = nodeFeatDict['UE'].reshape(num_graphs, num_UEs, -1)
+    power_matrix = power[:,:,-1][:, None, :]
+
+    channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
+
+    DS_k, PC_k, UI_k = component_calculate(power_matrix, channel_variance, large_scale, pilot_matrix, rho=rho_d)
+    
+    all_DS = [DS_k] + [r['DS'] for r in clientResponse]
+    all_PC = [PC_k] + [r['PC'] for r in clientResponse]
+    all_UI = [UI_k] + [r['UI'] for r in clientResponse]
+
+    all_DS = torch.cat(all_DS, dim=1)
+    all_PC = torch.cat(all_PC, dim=1)   
+    all_UI = torch.cat(all_UI, dim=1) 
+    
+    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
+    min_rate,_ = torch.min(rate, dim=1)
+    loss = torch.neg(min_rate) 
+
+    return torch.mean(loss)
+
+def rate_from_component(desiredSignal, pilotContamination, userInterference, numAntenna):
+    num_graphs, num_APs, num_UEs = desiredSignal.shape
+    devcie = desiredSignal.device
+    dtype = desiredSignal.dtype
+    
+    sum_DS = desiredSignal.sum(dim=1)  
+    num = (numAntenna**2) * (sum_DS ** 2) 
+
+    sum_PC = pilotContamination.sum(dim=1)
+    sum_UI = userInterference.sum(dim=1)  
+
+    term1 = (numAntenna**2) * ((sum_PC * (1 - torch.eye(num_UEs, device=devcie))).pow(2).sum(dim=1)) 
+    term2 = numAntenna * sum_UI.sum(dim=1)          
+    denom = term1 + term2 + 1
+
+    rate_all = torch.log2(1 + num/denom)  
+
+    return rate_all
+    
+
+def component_calculate(power, channelVariance, largeScale, phiMatrix, rho=0.1):
+    #################
+    # power                 : torch.rand(num_graphs, num_AP, num_UE)
+    # channelVariance       : torch.rand(num_graphs, num_AP, num_UE)
+    # largeScale            : torch.rand(num_graphs, num_AP, num_UE)
+    # phiMatrix             : torch.rand(num_graphs, num_UE, tau)
+    #################
+    device = power.device
+    
+    pilotContamination = torch.bmm(
+        phiMatrix,
+        phiMatrix.transpose(1, 2),
+    ).abs()
+    
+    DS_all = torch.sqrt(rho * power) * channelVariance 
+
+    tmp = rho * power * channelVariance
+    tmp = tmp.unsqueeze(-1)
+    largeScale_expand = largeScale.unsqueeze(-2)
+    UI_all = tmp * largeScale_expand
+
+    mask = torch.eye(UI_all.size(-1), device=device).bool()
+    UI_all[:, :, mask] = 0
+
+    tmp = torch.sqrt(rho * power) * channelVariance / largeScale
+    tmp = tmp.unsqueeze(-1)
+
+    tmp = tmp * largeScale_expand
+    PC_all = tmp * pilotContamination.unsqueeze(-3)
+    mask = torch.eye(PC_all.size(-1), device=device).bool()
+    PC_all[:, :, mask] = 0
+
+
+    return DS_all, PC_all, UI_all
+
+
+def package_calculate(batch, x_dict, tau, rho_p, rho_d):
+    num_graphs = batch.num_graphs
+    num_UEs = x_dict['UE'].shape[0] // num_graphs
+    num_APs = x_dict['AP'].shape[0] // num_graphs
+    ue_feature = x_dict['UE'].reshape(num_graphs, num_UEs, -1)
+    power = ue_feature[:,:, -1][:,None,:]
+    phiMatrix = ue_feature[:,:, :-1]
+
+    largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
+
+    channelVariance = variance_calculate(largeScale, phiMatrix, tau, rho_p)
+
+    
+    return component_calculate(power, channelVariance, largeScale, phiMatrix, rho=rho_d)
+
+
+def variance_calculate(largeScale, phiMatrix, tau, rho_p):
+    num = tau*rho_p * torch.square(largeScale) 
+
+    tmp = torch.square(torch.bmm(
+        phiMatrix,
+        phiMatrix.transpose(1, 2),
+    ).abs())
+
+    largeScale_exp = largeScale.unsqueeze(-1)  # Shape: (num_graphs, num_AP, num_UE, 1)
+    tmp_exp = tmp.unsqueeze(1)
+    term1 = torch.sum(largeScale_exp * tmp_exp, dim=2)
+    denom = tau * rho_p * term1 + 1
+
+    return num/denom
+
+
+def fl_train(
+        dataLoader, responseInfo, model, optimizer,
+        tau, rho_p, rho_d, num_antenna
+    ):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.train()
+    
+    total_loss = 0.0
+    total_graphs = 0
+    for batch, response in zip(dataLoader , responseInfo):
+        batch = batch.to(device)
+        num_graph = batch.num_graphs
+        x_dict, edge_dict, edge_index = model(batch)
+        loss = loss_function(
+            batch, x_dict, response, 
+            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+        )
+        loss.backward()
+        optimizer.step()
+    
+        total_loss += loss.item() * num_graph
+        total_graphs += num_graph
+
+    return total_loss/total_graphs 
+
+
+@torch.no_grad()
+def fl_eval(
+        dataLoader, responseInfo, model,
+        tau, rho_p, rho_d, num_antenna
+    ):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.eval()
+    
+    total_loss = 0.0
+    total_graphs = 0
+    for batch, response in zip(dataLoader , responseInfo):
+        batch = batch.to(device)
+        num_graph = batch.num_graphs
+        x_dict, edge_dict, edge_index = model(batch)
+        loss = loss_function(
+            batch, x_dict, response, 
+            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+        )
+        
+        total_loss += loss.item() * num_graph
+        total_graphs += num_graph
+
+    return -total_loss/total_graphs 
+
+
+def get_global_info(
+        loaderData, localModels, optimizers,
+        tau, rho_p, rho_d
+    ):
+    num_client = len(localModels)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    send_to_server = [[] for _ in range(num_client)] 
+    for batches  in zip(*loaderData):                       # sync step across APs
+        
+        for client_idx, (model, opt, batch) in enumerate(zip(localModels, optimizers, batches)):
+            # Check batch here? something wrong?
+            model.eval()
+            batch = batch.to(device)
+            
+            x_dict, edge_dict, edge_index = model(batch)
+            
+            DS_single, PC_single, UI_single = package_calculate(batch, x_dict, tau, rho_p, rho_d)
+
+            send_to_server[client_idx].append({
+                'DS': DS_single.detach(),
+                "PC": PC_single.detach(),
+                "UI": UI_single.detach()
+            })
+            
+    return send_to_server
+
+def distribute_global_info(send_to_server):
+    num_client = len(send_to_server)
+    response_all = []
+    for client_idx in range(num_client):
+        # for AP i, responses = list of lists of other APs’ packages
+        responses_this_ap = []
+        for batch_idx in range(len(send_to_server[client_idx])):
+            # all APs except itself for this batch index
+            other_responses = [
+                send_to_server[j][batch_idx]
+                for j in range(num_client) if j != client_idx
+            ]
+            responses_this_ap.append(other_responses)
+        response_all.append(responses_this_ap)
+    return response_all

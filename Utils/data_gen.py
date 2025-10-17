@@ -137,16 +137,26 @@ def get_cg(n):
 #     return data_list
 
 
-def create_graph(Beta_all, Phi_all):
+def create_graph(Beta_all, Phi_all, type='het', isDecentralized=True):
     num_sample, num_AP, num_UE = Beta_all.shape
     data_list = []
-    for each_AP in range(num_AP):
-        data_single_AP = []
+    if isDecentralized:
+        for each_AP in range(num_AP):
+            data_single_AP = []
+            for each_sample in range(num_sample):
+                if type=='het':
+                    data = full_het_graph(Beta_all[each_sample, each_AP][np.newaxis, :], Phi_all[each_sample])
+                    # data = single_het_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
+                elif type=='homo':
+                    data = single_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
+                else:
+                    raise ValueError(f'{type} graph is not defined!')
+                data_single_AP.append(data)
+            data_list.append(data_single_AP)
+    else:
         for each_sample in range(num_sample):
-            data = single_het_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
-            # data = single_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
-            data_single_AP.append(data)
-        data_list.append(data_single_AP)
+            data = full_het_graph(Beta_all[each_sample], Phi_all[each_sample])
+            data_list.append(data)
     return data_list 
 
 def single_graph(beta_single_AP, phi_single_AP):
@@ -171,6 +181,47 @@ def single_graph(beta_single_AP, phi_single_AP):
     return data
 
 
+
+def full_het_graph(beta_single_sample, phi_single_sample):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    num_AP, num_UE = beta_single_sample.shape
+
+    # Creating node features (random values for AP and UE nodes)
+    ap_features = np.random.rand(num_AP, 1)  # Random feature for AP node (dim 1)
+    ue_features = phi_single_sample  # Random feature for UE nodes (dim 1)
+
+    # Concatenate features for both AP and UE nodes
+    x_ap = torch.tensor(ap_features, dtype=torch.float).to(device)
+    x_ue = torch.tensor(ue_features, dtype=torch.float).to(device)
+
+    # Combine AP and UE node features
+    x = {'AP': x_ap, 'UE': x_ue}
+
+    # Define edges (connect AP to all UEs in a bipartite manner)
+    edge_index_ap_down_ue = []
+    edge_index_ue_up_ap = []
+
+    for ap_idx in range(num_AP):
+        for ue_idx in range(num_UE):
+            edge_index_ap_down_ue.append([ap_idx, ue_idx])  # AP (0) to UE (ue_idx)
+            edge_index_ue_up_ap.append([ue_idx, ap_idx])  # UE (ue_idx) to AP (0)
+
+    edge_index_ap_down_ue = torch.tensor(edge_index_ap_down_ue, dtype=torch.long).t().contiguous().to(device)
+    edge_index_ue_up_ap = torch.tensor(edge_index_ue_up_ap, dtype=torch.long).t().contiguous().to(device)
+    edge_attr_ap_to_ue = torch.tensor(beta_single_sample.reshape(-1, 1), dtype=torch.float).to(device)
+    edge_attr_ue_up_ap = torch.tensor(beta_single_sample.T.reshape(-1, 1), dtype=torch.float).to(device)
+
+    # Create the heterogeneous graph data
+    data = HeteroData()
+    data['AP'].x = x['AP']
+    data['UE'].x = x['UE']
+    data['AP', 'down', 'UE'].edge_index = edge_index_ap_down_ue
+    data['AP', 'down', 'UE'].edge_attr = edge_attr_ap_to_ue
+    data['UE', 'up', 'AP'].edge_index = edge_index_ue_up_ap
+    data['UE', 'up', 'AP'].edge_attr = edge_attr_ue_up_ap
+
+    return data
 
 def single_het_graph(beta_single_AP, phi_single_AP):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
