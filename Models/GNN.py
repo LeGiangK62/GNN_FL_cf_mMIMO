@@ -83,12 +83,14 @@ class APConvLayer(MessagePassing):
             out_channel,
             init_channel,
             metadata,
+            edge_conv=False,
             **kwargs
     ):
         super().__init__(aggr='add', **kwargs)
+        self.edge_conv = edge_conv
         self.metadata = metadata
         self.src_init_dict = init_channel
-        self.edge_init = edge_dim
+        self.edge_init = init_channel['edge']
         self.out_channel = out_channel
         self.src_dim_dict = src_dim_dict
 
@@ -104,11 +106,15 @@ class APConvLayer(MessagePassing):
             dst_init = init_channel[dst_type]
             self.msg[src_type] = MLP([src_dim + edge_dim, hidden , out_channel], batch_norm=True, dropout_prob=0.1)
             self.upd[dst_type] = MLP([out_channel + dst_dim, hidden, out_channel - dst_init], batch_norm=True, dropout_prob=0.1)
+        if self.edge_conv:
+            self.edge_upd= MLP([sum(src_dim_dict.values()) + edge_dim, hidden, out_channel - self.edge_init], batch_norm=True, dropout_prob=0.05)
 
     def reset_parameters(self):
         super().reset_parameters()
         glorot(self.msg)
         glorot(self.upd)
+        if self.edge_conv:
+            glorot(self.edge_upd)
 
     def forward(
             self,
@@ -131,6 +137,10 @@ class APConvLayer(MessagePassing):
             if self.src_dim_dict[dst_type] == self.out_channel:
                 tmp = tmp + 0.1 * x_dst[:,src_init_dim:]
             x_dict[dst_type] = torch.cat([x_dst[:,:src_init_dim], tmp], dim=1)
+            
+            # Edge update
+            if self.edge_conv:
+                edge_attr_dict[edge_type] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr_dict[edge_type])
         return x_dict, edge_attr_dict
 
     def message(self, x_j, x_i, edge_attr, edge_type):
@@ -141,11 +151,19 @@ class APConvLayer(MessagePassing):
         out = self.msg[src_type](out)
         return out
 
+    def edge_update(self, x_j, x_i, edge_attr):
+        tmp = torch.cat([x_j, edge_attr, x_i], dim=1)
+        out = self.edge_upd(tmp)
+        if self.out_channel == self.edge_init:
+            out = out + 0.1 * edge_attr
+        out = torch.cat([edge_attr[:,:self.edge_init], out], dim=1)
+        return out
 
 
 class APHetNet(nn.Module):
-    def __init__(self, metadata, dim_dict, out_channels, num_layers=0, hid_layers=4):
+    def __init__(self, metadata, dim_dict, out_channels, num_layers=0, hid_layers=4, edge_conv=False):
         super(APHetNet, self).__init__()
+        self.edge_conv = edge_conv
         src_dim_dict = dim_dict
 
         self.ue_dim = src_dim_dict['UE']
@@ -159,7 +177,8 @@ class APHetNet(nn.Module):
                 {'UE': self.ue_dim, 'AP': self.ap_dim},
                 self.edge_dim,
                 out_channels, src_dim_dict,
-                [('UE', 'up', 'AP')]
+                [('UE', 'up', 'AP')],
+                edge_conv=edge_conv
             )
         )
         
@@ -168,11 +187,24 @@ class APHetNet(nn.Module):
                 {'UE': self.ue_dim, 'AP': out_channels},
                 self.edge_dim,
                 out_channels, src_dim_dict,
-                [('AP', 'down', 'UE')]
+                [('AP', 'down', 'UE')],
+                edge_conv=edge_conv
             )
         )
         for _ in range(num_layers):
-            conv = APConvLayer({'UE': out_channels, 'AP': out_channels}, self.edge_dim, out_channels, src_dim_dict, [('UE', 'up', 'AP'), ('AP', 'down', 'UE')])
+            if self.edge_conv:
+                conv = APConvLayer(
+                    {'UE': out_channels, 'AP': out_channels}, 
+                    out_channels, out_channels, src_dim_dict, 
+                    [('UE', 'up', 'AP'), ('AP', 'down', 'UE')],
+                    edge_conv=edge_conv
+                )
+            else:
+                conv = APConvLayer(
+                    {'UE': out_channels, 'AP': out_channels}, 
+                    self.edge_dim, out_channels, src_dim_dict, 
+                    [('UE', 'up', 'AP'), ('AP', 'down', 'UE')]
+                )
             self.convs.append(conv)
 
 
@@ -182,6 +214,10 @@ class APHetNet(nn.Module):
         
         self.AP_gen = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1)
         self.AP_gen = nn.Sequential(*[self.AP_gen, Seq(Lin(hid, 1)), Sigmoid()])
+        
+        if self.edge_conv:
+            self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1)
+            self.power_edge = nn.Sequential(*[self.power_edge, Seq(Lin(hid, 1)), Sigmoid()])
 
 
     def forward(self, batch):
@@ -192,5 +228,9 @@ class APHetNet(nn.Module):
         dl_power = self.power(x_dict['UE'])
         x_dict['UE'] = torch.cat([x_dict['UE'][:,:self.ue_dim], dl_power], dim=1)
         x_dict['AP'] = self.AP_gen(x_dict['AP'])
+        
+        if self.edge_conv:
+            edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
+            edge_attr_dict[('AP', 'down', 'UE')] = torch.cat([edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], dim=1)
 
         return x_dict, edge_attr_dict, edge_index_dict
