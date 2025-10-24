@@ -43,8 +43,8 @@ def Generate_Input(num_H, tau, K, M, Pd, D=1, Hb=15, Hm=1.65, f=1900,
         
         
         # Random positions for APs and UEs
-        AP = np.random.uniform(-1, 1, size=(M, 2))
-        Ter = np.random.uniform(-1, 1, size=(K, 2))
+        AP = np.random.uniform(-D, D, size=(M, 2))
+        Ter = np.random.uniform(-D, D, size=(K, 2))
         # Create an MxK large-scale coefficients beta_mk
         BETAA = np.zeros((M, K))
         # dist = np.zeros((M, K))

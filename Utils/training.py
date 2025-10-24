@@ -219,12 +219,14 @@ def loss_function(graphData, nodeFeatDict, clientResponse, tau, rho_p, rho_d, nu
     
     pilot_matrix = graphData['UE'].x.reshape(num_graphs, num_UEs, -1)
     large_scale = graphData['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
-
     power = nodeFeatDict['UE'].reshape(num_graphs, num_UEs, -1)
     power_matrix = power[:,:,-1][:, None, :]
 
     channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
-
+    # scaling for power constraints
+    sum_weighted = torch.sum(power_matrix * channel_variance, dim=1, keepdim=True)   # shape (M,1)
+    power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
+    
     DS_k, PC_k, UI_k = component_calculate(power_matrix, channel_variance, large_scale, pilot_matrix, rho=rho_d)
     
     all_DS = [DS_k] + [r['DS'] for r in clientResponse]
@@ -355,29 +357,29 @@ def fl_train(
     return total_loss/total_graphs 
 
 
-@torch.no_grad()
-def fl_eval(
-        dataLoader, responseInfo, model,
-        tau, rho_p, rho_d, num_antenna
-    ):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.eval()
+# @torch.no_grad()
+# def fl_eval(
+#         dataLoader, responseInfo, model,
+#         tau, rho_p, rho_d, num_antenna
+#     ):
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     model.eval()
     
-    total_loss = 0.0
-    total_graphs = 0
-    for batch, response in zip(dataLoader , responseInfo):
-        batch = batch.to(device)
-        num_graph = batch.num_graphs
-        x_dict, edge_dict, edge_index = model(batch)
-        loss = loss_function(
-            batch, x_dict, response, 
-            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
-        )
+#     total_loss = 0.0
+#     total_graphs = 0
+#     for batch, response in zip(dataLoader , responseInfo):
+#         batch = batch.to(device)
+#         num_graph = batch.num_graphs
+#         x_dict, edge_dict, edge_index = model(batch)
+#         loss = loss_function(
+#             batch, x_dict, response, 
+#             tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+#         )
         
-        total_loss += loss.item() * num_graph
-        total_graphs += num_graph
+#         total_loss += loss.item() * num_graph
+#         total_graphs += num_graph
 
-    return -total_loss/total_graphs 
+#     return -total_loss/total_graphs 
 
 
 @torch.no_grad()
@@ -405,6 +407,9 @@ def fl_eval_rate(
             power_matrix = power[:,:,-1][:, None, :]
             pilot_matrix = batch['UE'].x.reshape(num_graphs, num_UEs, -1)
             large_scale = batch['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
+            channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
+            sum_weighted = torch.sum(power_matrix * channel_variance, dim=1, keepdim=True)   # shape (M,1)
+            power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
             
             per_batch_power.append(power_matrix)
             per_batch_large_scale.append(large_scale)
@@ -478,7 +483,7 @@ def distribute_global_info(send_to_server):
 # Centralized Training
 
 
-def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_antenna):
+def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_antenna, eval_mode=False):
     num_graph = graphData.num_graphs
 
     num_APs = graphData['AP'].x.shape[0]//num_graph
@@ -488,12 +493,21 @@ def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_
     power_matrix = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,1]
     phi_matrix = graphData['UE'].x.reshape(num_graph, num_UEs, -1)
     channel_var = variance_calculate(large_scale, phi_matrix, tau=tau, rho_p=rho_p)
+    # channel_var = channel_var/rho_d
+    sum_weighted = torch.sum(power_matrix * channel_var, dim=1, keepdim=True)   # shape (M,1)
+    power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
+    
     rate = rate_calculation(power_matrix, large_scale, channel_var, phi_matrix, rho_d, num_antenna)
     
-    min_rate, _ =torch.min(rate, dim=0)
-    loss = torch.mean(min_rate)    
     
-    return torch.neg(loss)
+    min_rate, _ = torch.min(rate, dim=1)
+    if eval_mode:
+        full = torch.ones_like(power_matrix)
+        rate_full_one = rate_calculation(full, large_scale, channel_var, phi_matrix, rho_d, num_antenna)
+        min_rate_one, _ = torch.min(rate_full_one, dim=1)
+        return min_rate, min_rate_one
+    else:
+        return torch.neg(torch.mean(min_rate))
 
 
 def cen_train(
@@ -560,7 +574,7 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment, 
     # Output
     # rate:               Achievable rate of every UE     [num_samples, num_UE]
     #
-    #===========================================
+    #===========================================    
     powerMatrix = torch.sqrt(powerMatrix)
     SINR_num = torch.sum(powerMatrix*channelVariance, dim=1) ** 2 * (rho_d * num_antenna ** 2)
 
