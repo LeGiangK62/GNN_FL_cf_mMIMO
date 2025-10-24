@@ -277,9 +277,9 @@ def component_calculate(power, channelVariance, largeScale, phiMatrix, rho=0.1):
         phiMatrix.transpose(1, 2),
     ).abs()
     
-    DS_all = torch.sqrt(rho * power) * channelVariance 
+    DS_all = torch.sqrt(power) * channelVariance 
 
-    tmp = rho * power * channelVariance
+    tmp = power * channelVariance
     tmp = tmp.unsqueeze(-1)
     largeScale_expand = largeScale.unsqueeze(-2)
     UI_all = tmp * largeScale_expand
@@ -287,7 +287,7 @@ def component_calculate(power, channelVariance, largeScale, phiMatrix, rho=0.1):
     mask = torch.eye(UI_all.size(-1), device=device).bool()
     UI_all[:, :, mask] = 0
 
-    tmp = torch.sqrt(rho * power) * channelVariance / largeScale
+    tmp = torch.sqrt(power) * channelVariance / largeScale
     tmp = tmp.unsqueeze(-1)
 
     tmp = tmp * largeScale_expand
@@ -316,7 +316,7 @@ def package_calculate(batch, x_dict, tau, rho_p, rho_d):
 
 
 def variance_calculate(largeScale, phiMatrix, tau, rho_p):
-    num = tau*rho_p * torch.square(largeScale) 
+    num = tau * torch.square(largeScale) 
 
     tmp = torch.square(torch.bmm(
         phiMatrix,
@@ -326,7 +326,7 @@ def variance_calculate(largeScale, phiMatrix, tau, rho_p):
     largeScale_exp = largeScale.unsqueeze(-1)  # Shape: (num_graphs, num_AP, num_UE, 1)
     tmp_exp = tmp.unsqueeze(1)
     term1 = torch.sum(largeScale_exp * tmp_exp, dim=2)
-    denom = tau * rho_p * term1 + 1
+    denom = tau * term1 + 1
 
     return num/denom
 
@@ -493,7 +493,6 @@ def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_
     power_matrix = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,1]
     phi_matrix = graphData['UE'].x.reshape(num_graph, num_UEs, -1)
     channel_var = variance_calculate(large_scale, phi_matrix, tau=tau, rho_p=rho_p)
-    # channel_var = channel_var/rho_d
     sum_weighted = torch.sum(power_matrix * channel_var, dim=1, keepdim=True)   # shape (M,1)
     power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
     
@@ -576,7 +575,7 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment, 
     #
     #===========================================    
     powerMatrix = torch.sqrt(powerMatrix)
-    SINR_num = torch.sum(powerMatrix*channelVariance, dim=1) ** 2 * (rho_d * num_antenna ** 2)
+    SINR_num = torch.sum(powerMatrix*channelVariance, dim=1) ** 2 * (num_antenna ** 2)
 
     powerExpanded = ((powerMatrix**2) *channelVariance).unsqueeze(-1)
     largeScaleExpanded = largeScale.unsqueeze(-2)
@@ -596,6 +595,6 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment, 
     pilotContamination = torch.sum(pilotContamination, dim=1)
 
 
-    SINR_denom = 1 + userInterference * rho_d * num_antenna + pilotContamination * rho_d * num_antenna ** 2
+    SINR_denom = 1 + userInterference * num_antenna + pilotContamination * num_antenna ** 2
     rate = torch.log2(1 + SINR_num/SINR_denom)
     return rate
