@@ -225,12 +225,13 @@ class APHetNet(nn.Module):
         for conv in self.convs:
             x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
 
-        dl_power = self.power(x_dict['UE'])
-        x_dict['UE'] = torch.cat([x_dict['UE'][:,:self.ue_dim], dl_power], dim=1)
-        x_dict['AP'] = self.AP_gen(x_dict['AP'])
         
         if self.edge_conv:
             edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
             edge_attr_dict[('AP', 'down', 'UE')] = torch.cat([edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], dim=1)
+        else:
+            dl_power = self.power(x_dict['UE'])
+            x_dict['UE'] = torch.cat([x_dict['UE'][:,:self.ue_dim], dl_power], dim=1)
+        # x_dict['AP'] = self.AP_gen(x_dict['AP'])
 
         return x_dict, edge_attr_dict, edge_index_dict

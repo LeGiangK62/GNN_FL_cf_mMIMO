@@ -7,14 +7,22 @@ from Utils.comm import (
 )
 
 
-def loss_function(graphData, nodeFeatDict, clientResponse, tau, rho_p, rho_d, num_antenna):
+def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p, rho_d, num_antenna, isEdgeUpd):
     num_graphs = graphData.num_graphs
     num_UEs = graphData['UE'].x.shape[0]//num_graphs
     num_APs = graphData['AP'].x.shape[0]//num_graphs
     
+    large_scale_mean, large_scale_std = graphData.mean, graphData.std
+    
     pilot_matrix = graphData['UE'].x.reshape(num_graphs, num_UEs, -1)
-    large_scale = graphData['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
-    power = nodeFeatDict['UE'].reshape(num_graphs, num_UEs, -1)
+    if isEdgeUpd:
+        large_scale = edgeDict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
+        power = edgeDict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
+    else:
+        large_scale = graphData['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
+        power = nodeFeatDict['UE'].reshape(num_graphs, num_UEs, -1)
+        
+    large_scale = large_scale * large_scale_std + large_scale_mean
     power_matrix = power[:,:,-1][:, None, :]
 
     channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
@@ -43,7 +51,7 @@ def loss_function(graphData, nodeFeatDict, clientResponse, tau, rho_p, rho_d, nu
 
 def fl_train(
         dataLoader, responseInfo, model, optimizer,
-        tau, rho_p, rho_d, num_antenna
+        tau, rho_p, rho_d, num_antenna, isEdgeUpd=False
     ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.train()
@@ -54,10 +62,10 @@ def fl_train(
         batch = batch.to(device)
         num_graph = batch.num_graphs
         optimizer.zero_grad() 
-        x_dict, _, _ = model(batch)
+        x_dict, attr_dict, _ = model(batch)
         loss = loss_function(
-            batch, x_dict, response, 
-            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+            batch, x_dict, attr_dict, response, 
+            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna, isEdgeUpd=isEdgeUpd
         )
         loss.backward()
         optimizer.step()
@@ -71,7 +79,7 @@ def fl_train(
 @torch.no_grad()
 def fl_eval_rate(
         dataLoader, models,
-        tau, rho_p, rho_d, num_antenna
+        tau, rho_p, rho_d, num_antenna, isEdgeUpd=False
     ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     all_power = []
@@ -87,12 +95,18 @@ def fl_eval_rate(
             num_graphs = batch.num_graphs
             num_UEs = batch['UE'].x.shape[0]//num_graphs
             num_APs = batch['AP'].x.shape[0]//num_graphs
+            large_scale_mean, large_scale_std = batch.mean, batch.std
             
             x_dict, edge_dict, edge_index = model(batch)
-            power = x_dict['UE'].reshape(num_graphs, num_UEs, -1)
+            if isEdgeUpd:
+                large_scale = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
+                power = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
+            else:
+                large_scale = batch['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
+                power = x_dict['UE'].reshape(num_graphs, num_UEs, -1)
+            large_scale = large_scale * large_scale_std + large_scale_mean
             power_matrix = power[:,:,-1][:, None, :]
             pilot_matrix = batch['UE'].x.reshape(num_graphs, num_UEs, -1)
-            large_scale = batch['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
             channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
             sum_weighted = torch.sum(power_matrix * channel_variance, dim=1, keepdim=True)   # shape (M,1)
             power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted)/num_antenna)

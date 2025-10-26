@@ -9,8 +9,12 @@ def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_
 
     num_APs = graphData['AP'].x.shape[0]//num_graph
     num_UEs = graphData['UE'].x.shape[0]//num_graph
+    
+    large_scale_mean, large_scale_std = graphData.mean, graphData.std
+
 
     large_scale = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,0]
+    large_scale = large_scale * large_scale_std + large_scale_mean
     power_matrix = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,1]
     phi_matrix = graphData['UE'].x.reshape(num_graph, num_UEs, -1)
     channel_var = variance_calculate(large_scale, phi_matrix, tau=tau, rho_p=rho_p)

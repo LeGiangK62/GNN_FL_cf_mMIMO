@@ -137,7 +137,7 @@ def get_cg(n):
 #     return data_list
 
 
-def create_graph(Beta_all, Phi_all, type='het', isDecentralized=True):
+def create_graph(Beta_all, Phi_all, Beta_mean, Beta_std, type='het', isDecentralized=True):
     num_sample, num_AP, num_UE = Beta_all.shape
     data_list = []
     if isDecentralized:
@@ -145,21 +145,21 @@ def create_graph(Beta_all, Phi_all, type='het', isDecentralized=True):
             data_single_AP = []
             for each_sample in range(num_sample):
                 if type=='het':
-                    data = full_het_graph(Beta_all[each_sample, each_AP][np.newaxis, :], Phi_all[each_sample])
+                    data = full_het_graph(Beta_all[each_sample, each_AP][np.newaxis, :], Phi_all[each_sample], Beta_mean, Beta_std)
                     # data = single_het_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
                 elif type=='homo':
-                    data = single_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
+                    data = single_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample], Beta_mean, Beta_std)
                 else:
                     raise ValueError(f'{type} graph is not defined!')
                 data_single_AP.append(data)
             data_list.append(data_single_AP)
     else:
         for each_sample in range(num_sample):
-            data = full_het_graph(Beta_all[each_sample], Phi_all[each_sample])
+            data = full_het_graph(Beta_all[each_sample], Phi_all[each_sample], Beta_mean, Beta_std)
             data_list.append(data)
     return data_list 
 
-def single_graph(beta_single_AP, phi_single_AP):
+def single_graph(beta_single_AP, phi_single_AP, Beta_mean, Beta_std):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     num_UE = beta_single_AP.shape[0]
     
@@ -178,11 +178,13 @@ def single_graph(beta_single_AP, phi_single_AP):
     
     
     data = Data(x=x, edge_index=edge_index.t().contiguous(),edge_attr = edge_attr)
+    data.mean = Beta_mean
+    data.std = Beta_std
     return data
 
 
 
-def full_het_graph(beta_single_sample, phi_single_sample):
+def full_het_graph(beta_single_sample, phi_single_sample, Beta_mean, Beta_std,):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     num_AP, num_UE = beta_single_sample.shape
@@ -220,6 +222,9 @@ def full_het_graph(beta_single_sample, phi_single_sample):
     data['AP', 'down', 'UE'].edge_attr = edge_attr_ap_to_ue
     data['UE', 'up', 'AP'].edge_index = edge_index_ue_up_ap
     data['UE', 'up', 'AP'].edge_attr = edge_attr_ue_up_ap
+    
+    data.mean = Beta_mean
+    data.std = Beta_std
 
     return data
 
