@@ -69,7 +69,11 @@ def rate_from_component(desiredSignal, pilotContamination, userInterference, num
     sum_PC = pilotContamination.sum(dim=1)
     sum_UI = userInterference.sum(dim=1)  
 
-    term1 = (numAntenna**2) * ((sum_PC * (1 - torch.eye(num_UEs, device=devcie))).pow(2).sum(dim=1)) 
+    
+    sum_PC = sum_PC ** 2
+    term1 = sum_PC * (1 - torch.eye(num_UEs, device=devcie))
+    term1 = (numAntenna**2) * term1.sum(dim=1)
+    # term1 = (numAntenna**2) * ((sum_PC * (1 - torch.eye(num_UEs, device=devcie))).pow(2).sum(dim=1)) 
     term2 = numAntenna * sum_UI.sum(dim=1)          
     denom = term1 + term2 + 1
 
@@ -84,6 +88,10 @@ def component_calculate(power, channelVariance, largeScale, phiMatrix, rho=0.1):
     # channelVariance       : torch.rand(num_graphs, num_AP, num_UE)
     # largeScale            : torch.rand(num_graphs, num_AP, num_UE)
     # phiMatrix             : torch.rand(num_graphs, num_UE, tau)
+    # out
+    # DS: num_graphs, num_AP, num_UE
+    # PC: num_graphs, num_AP, num_UE_prime, num_UE
+    # UI: num_graphs, num_AP, num_UE_prime, num_UE
     #################
     device = power.device
     
@@ -99,32 +107,32 @@ def component_calculate(power, channelVariance, largeScale, phiMatrix, rho=0.1):
     largeScale_expand = largeScale.unsqueeze(-2)
     UI_all = tmp * largeScale_expand
 
-    mask = torch.eye(UI_all.size(-1), device=device).bool()
-    UI_all[:, :, mask] = 0
+    # mask = torch.eye(UI_all.size(-1), device=device).bool()
+    # UI_all[:, :, mask] = 0
 
     tmp = torch.sqrt(power) * channelVariance / largeScale
     tmp = tmp.unsqueeze(-1)
 
     tmp = tmp * largeScale_expand
     PC_all = tmp * pilotContamination.unsqueeze(-3)
-    mask = torch.eye(PC_all.size(-1), device=device).bool()
-    PC_all[:, :, mask] = 0
+    # mask = torch.eye(PC_all.size(-1), device=device).bool()
+    # PC_all[:, :, mask] = 0
 
 
     return DS_all, PC_all, UI_all
 
 
-def package_calculate(batch, x_dict, tau, rho_p, rho_d):
-    num_graphs = batch.num_graphs
-    num_UEs = x_dict['UE'].shape[0] // num_graphs
-    num_APs = x_dict['AP'].shape[0] // num_graphs
-    ue_feature = x_dict['UE'].reshape(num_graphs, num_UEs, -1)
-    power = ue_feature[:,:, -1][:,None,:]
-    phiMatrix = ue_feature[:,:, :-1]
+# def package_calculate(batch, x_dict, tau, rho_p, rho_d):
+#     num_graphs = batch.num_graphs
+#     num_UEs = x_dict['UE'].shape[0] // num_graphs
+#     num_APs = x_dict['AP'].shape[0] // num_graphs
+#     ue_feature = x_dict['UE'].reshape(num_graphs, num_UEs, -1)
+#     power = ue_feature[:,:, -1][:,None,:]
+#     phiMatrix = ue_feature[:,:, :-1]
 
-    largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
+#     largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
 
-    channelVariance = variance_calculate(largeScale, phiMatrix, tau, rho_p)
+#     channelVariance = variance_calculate(largeScale, phiMatrix, tau, rho_p)
 
     
-    return component_calculate(power, channelVariance, largeScale, phiMatrix, rho=rho_d)
+#     return component_calculate(power, channelVariance, largeScale, phiMatrix, rho=rho_d)

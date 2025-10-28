@@ -1,5 +1,5 @@
 import torch
-from Utils.comm import variance_calculate, rate_calculation
+from Utils.comm import variance_calculate, rate_calculation, component_calculate, rate_from_component
 
 # Centralized Training
 
@@ -20,8 +20,13 @@ def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_
     channel_var = variance_calculate(large_scale, phi_matrix, tau=tau, rho_p=rho_p)
     sum_weighted = torch.sum(power_matrix * channel_var, dim=1, keepdim=True)   # shape (M,1)
     power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted)/num_antenna)
+    # power_matrix = torch.softmax(power_matrix, dim=1)
+    # power_matrix = power_matrix/channel_var
     
-    rate = rate_calculation(power_matrix, large_scale, channel_var, phi_matrix, rho_d, num_antenna)
+    # rate = rate_calculation(power_matrix, large_scale, channel_var, phi_matrix, rho_d, num_antenna)
+    
+    all_DS, all_PC, all_UI = component_calculate(power_matrix, channel_var, large_scale, phi_matrix, rho=rho_d)
+    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
     
     
     min_rate, _ = torch.min(rate, dim=1)

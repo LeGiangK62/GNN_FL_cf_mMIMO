@@ -1,8 +1,8 @@
 import torch
-
 import numpy as np
+from torch.utils.data import Subset
+from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data, HeteroData
-
 # 1. Location & Channel generation
 def Generate_Input(num_H, tau, K, M, Pd, D=1, Hb=15, Hm=1.65, f=1900,
                     var_noise=1, Pmin=0, power_f=0.2, seed=2017, d0=0.01, d1=0.05):
@@ -145,7 +145,7 @@ def create_graph(Beta_all, Phi_all, Beta_mean, Beta_std, type='het', isDecentral
             data_single_AP = []
             for each_sample in range(num_sample):
                 if type=='het':
-                    data = full_het_graph(Beta_all[each_sample, each_AP][np.newaxis, :], Phi_all[each_sample], Beta_mean, Beta_std)
+                    data = full_het_graph(Beta_all[each_sample, each_AP][np.newaxis, :], Phi_all[each_sample], Beta_mean, Beta_std, each_AP, each_sample)
                     # data = single_het_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample])
                 elif type=='homo':
                     data = single_graph(Beta_all[each_sample, each_AP], Phi_all[each_sample], Beta_mean, Beta_std)
@@ -159,7 +159,7 @@ def create_graph(Beta_all, Phi_all, Beta_mean, Beta_std, type='het', isDecentral
             data_list.append(data)
     return data_list 
 
-def single_graph(beta_single_AP, phi_single_AP, Beta_mean, Beta_std):
+def single_graph(beta_single_AP, phi_single_AP, beta_mean, beta_std):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     num_UE = beta_single_AP.shape[0]
     
@@ -178,13 +178,13 @@ def single_graph(beta_single_AP, phi_single_AP, Beta_mean, Beta_std):
     
     
     data = Data(x=x, edge_index=edge_index.t().contiguous(),edge_attr = edge_attr)
-    data.mean = Beta_mean
-    data.std = Beta_std
+    data.mean = torch.tensor([[[beta_mean]]], dtype=torch.float).to(device)
+    data.std = torch.tensor([[[beta_std]]], dtype=torch.float).to(device)
     return data
 
 
 
-def full_het_graph(beta_single_sample, phi_single_sample, Beta_mean, Beta_std,):
+def full_het_graph(beta_single_sample, phi_single_sample, beta_mean, beta_std, ap_id=None, sample_id=None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     num_AP, num_UE = beta_single_sample.shape
@@ -223,8 +223,11 @@ def full_het_graph(beta_single_sample, phi_single_sample, Beta_mean, Beta_std,):
     data['UE', 'up', 'AP'].edge_index = edge_index_ue_up_ap
     data['UE', 'up', 'AP'].edge_attr = edge_attr_ue_up_ap
     
-    data.mean = Beta_mean
-    data.std = Beta_std
+    data.mean = torch.tensor([[[beta_mean]]], dtype=torch.float).to(device)
+    data.std = torch.tensor([[[beta_std]]], dtype=torch.float).to(device)
+    
+    data.ap_id = ap_id
+    data.sample_id = sample_id
 
     return data
 
@@ -310,3 +313,36 @@ def single_syn_het_graph(ap_feat, large_scale_feat):
 
     return data
 
+## Check functions
+
+
+def check_alignment(loaders):
+    # same number of batches?
+    lens = [len(dl) for dl in loaders]
+    assert len(set(lens)) == 1, f"Different #batches per AP: {lens}"
+
+    for b_idx, batches in enumerate(zip(*loaders)):
+        # All batches should contain the same set of sample_ids
+        id_sets = []
+        for batch in batches:
+            # batch is a PyG Batch object; access per-graph attributes via slicing
+            ids = batch.sample_id.cpu().numpy().tolist()
+            id_sets.append(tuple(ids))
+        ref = id_sets[0]
+        for ap_id, ids in enumerate(id_sets[1:], start=1):
+            assert ids == ref, f"Misaligned at batch {b_idx}: AP0 {ref} vs AP{ap_id} {ids}"
+
+    print("✔ Alignment OK: identical sample_ids per batch across APs.")
+    
+
+def build_loader(per_ap_datasets, batch_size, seed, drop_last=True, num_workers=0):
+    n = len(per_ap_datasets[0])
+    assert all(len(ds) == n for ds in per_ap_datasets), "All AP datasets must have same length."
+    g = torch.Generator().manual_seed(seed)
+    order = torch.randperm(n, generator=g).tolist()  # same random order for all APs
+
+    loaders = []
+    for ds in per_ap_datasets:
+        subset = Subset(ds, order)  # fixes the order
+        loaders.append(DataLoader(subset, batch_size=batch_size, shuffle=False, drop_last=drop_last, num_workers=num_workers))
+    return loaders

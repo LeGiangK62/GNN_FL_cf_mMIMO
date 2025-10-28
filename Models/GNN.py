@@ -209,16 +209,16 @@ class APHetNet(nn.Module):
 
 
         hid = hid_layers # too much is not good - 8 is bad, 4 is currently good
-        self.power = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1)
-        self.power = nn.Sequential(*[self.power, Seq(Lin(hid, 1)), Sigmoid()])
         
-        self.AP_gen = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1)
-        self.AP_gen = nn.Sequential(*[self.AP_gen, Seq(Lin(hid, 1)), Sigmoid()])
+        # self.AP_gen = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1)
+        # self.AP_gen = nn.Sequential(*[self.AP_gen, Seq(Lin(hid, 1)), Sigmoid()])
         
         if self.edge_conv:
             self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1)
             self.power_edge = nn.Sequential(*[self.power_edge, Seq(Lin(hid, 1)), Sigmoid()])
-
+        else:
+            self.power = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1)
+            self.power = nn.Sequential(*[self.power, Seq(Lin(hid, 1)), Sigmoid()])
 
     def forward(self, batch):
         x_dict, edge_index_dict, edge_attr_dict = batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict
