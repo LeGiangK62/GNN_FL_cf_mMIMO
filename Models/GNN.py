@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch_geometric.nn.conv import MessagePassing
-from torch.nn import Sequential as Seq, Linear as Lin, ReLU, Sigmoid, BatchNorm1d as BN, Dropout, ReLU
+from torch.nn import Sequential as Seq, Linear as Lin, ReLU, Sigmoid, BatchNorm1d as BN, LayerNorm, Dropout, ReLU
 from torch_geometric.nn.inits import glorot, reset
 from torch_geometric.utils import dropout_node
 
@@ -13,6 +13,7 @@ def MLP(channels, batch_norm=True, dropout_prob=0):
         layers.append(Seq(Lin(channels[i - 1], channels[i])))
         if batch_norm:
             layers.append(BN(channels[i]))
+            # layers.append(LayerNorm(channels[i]))
         if dropout_prob:
             layers.append(Dropout(dropout_prob))  # Add dropout after batch norm or activation
         layers.append(ReLU())

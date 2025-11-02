@@ -19,7 +19,8 @@ def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_
     phi_matrix = graphData['UE'].x.reshape(num_graph, num_UEs, -1)
     channel_var = variance_calculate(large_scale, phi_matrix, tau=tau, rho_p=rho_p)
     sum_weighted = torch.sum(power_matrix * channel_var, dim=1, keepdim=True)   # shape (M,1)
-    power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted)/num_antenna)
+    power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
+    power_matrix /= num_antenna
     # power_matrix = torch.softmax(power_matrix, dim=1)
     # power_matrix = power_matrix/channel_var
     

@@ -42,3 +42,8 @@ Please cite my paper (To be update...)
 ## Contact
 
 Mr. Le Tung GIANG - tung.giangle99@gmail.com or giang.lt2399144@pusan.ac.kr
+
+
+## Note
+
+lr 5e-3 is currently the best => try 1e-2
