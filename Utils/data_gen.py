@@ -166,7 +166,7 @@ def single_graph(beta_single_AP, phi_single_AP, beta_mean, beta_std):
     x1 = np.expand_dims(beta_single_AP, axis=1)
     x2 = np.random.rand(x1.shape[0],1)
     x = np.concatenate((x1,phi_single_AP,x2), axis = 1)
-    x = torch.tensor(x, dtype = torch.float).to(device)
+    x = torch.tensor(x, dtype = torch.float64).to(device)
     edge_index = get_cg(num_UE)
     
     edge_attr = []
@@ -174,12 +174,12 @@ def single_graph(beta_single_AP, phi_single_AP, beta_mean, beta_std):
         edge_attr.append([beta_single_AP[e[0]], beta_single_AP[e[1]]])
         
     edge_index = torch.tensor(edge_index, dtype = torch.long).to(device)
-    edge_attr = torch.tensor(edge_attr, dtype = torch.float).to(device)
+    edge_attr = torch.tensor(edge_attr, dtype = torch.float64).to(device)
     
     
     data = Data(x=x, edge_index=edge_index.t().contiguous(),edge_attr = edge_attr)
-    data.mean = torch.tensor([[[beta_mean]]], dtype=torch.float).to(device)
-    data.std = torch.tensor([[[beta_std]]], dtype=torch.float).to(device)
+    data.mean = torch.tensor([[[beta_mean]]], dtype=torch.float64).to(device)
+    data.std = torch.tensor([[[beta_std]]], dtype=torch.float64).to(device)
     return data
 
 
@@ -194,8 +194,8 @@ def full_het_graph(beta_single_sample, phi_single_sample, beta_mean, beta_std, a
     ue_features = phi_single_sample  # Random feature for UE nodes (dim 1)
 
     # Concatenate features for both AP and UE nodes
-    x_ap = torch.tensor(ap_features, dtype=torch.float).to(device)
-    x_ue = torch.tensor(ue_features, dtype=torch.float).to(device)
+    x_ap = torch.tensor(ap_features, dtype=torch.float64).to(device)
+    x_ue = torch.tensor(ue_features, dtype=torch.float64).to(device)
 
     # Combine AP and UE node features
     x = {'AP': x_ap, 'UE': x_ue}
@@ -211,8 +211,8 @@ def full_het_graph(beta_single_sample, phi_single_sample, beta_mean, beta_std, a
 
     edge_index_ap_down_ue = torch.tensor(edge_index_ap_down_ue, dtype=torch.long).t().contiguous().to(device)
     edge_index_ue_up_ap = torch.tensor(edge_index_ue_up_ap, dtype=torch.long).t().contiguous().to(device)
-    edge_attr_ap_to_ue = torch.tensor(beta_single_sample.reshape(-1, 1), dtype=torch.float).to(device)
-    edge_attr_ue_up_ap = torch.tensor(beta_single_sample.T.reshape(-1, 1), dtype=torch.float).to(device)
+    edge_attr_ap_to_ue = torch.tensor(beta_single_sample.reshape(-1, 1), dtype=torch.float64).to(device)
+    edge_attr_ue_up_ap = torch.tensor(beta_single_sample.T.reshape(-1, 1), dtype=torch.float64).to(device)
 
     # Create the heterogeneous graph data
     data = HeteroData()
@@ -223,8 +223,8 @@ def full_het_graph(beta_single_sample, phi_single_sample, beta_mean, beta_std, a
     data['UE', 'up', 'AP'].edge_index = edge_index_ue_up_ap
     data['UE', 'up', 'AP'].edge_attr = edge_attr_ue_up_ap
     
-    data.mean = torch.tensor([[[beta_mean]]], dtype=torch.float).to(device)
-    data.std = torch.tensor([[[beta_std]]], dtype=torch.float).to(device)
+    data.mean = torch.tensor([[[beta_mean]]], dtype=torch.float64).to(device)
+    data.std = torch.tensor([[[beta_std]]], dtype=torch.float64).to(device)
     
     data.ap_id = ap_id
     data.sample_id = sample_id
@@ -242,8 +242,8 @@ def single_het_graph(beta_single_AP, phi_single_AP):
     ue_features = phi_single_AP  # Random feature for UE nodes (dim 1)
 
     # Concatenate features for both AP and UE nodes
-    x_ap = torch.tensor(ap_features, dtype=torch.float).to(device)
-    x_ue = torch.tensor(ue_features, dtype=torch.float).to(device)
+    x_ap = torch.tensor(ap_features, dtype=torch.float64).to(device)
+    x_ue = torch.tensor(ue_features, dtype=torch.float64).to(device)
 
     # Combine AP and UE node features
     x = {'AP': x_ap, 'UE': x_ue}
@@ -258,8 +258,8 @@ def single_het_graph(beta_single_AP, phi_single_AP):
 
     edge_index_ap_down_ue = torch.tensor(edge_index_ap_down_ue, dtype=torch.long).t().contiguous().to(device)
     edge_index_ue_up_ap = torch.tensor(edge_index_ue_up_ap, dtype=torch.long).t().contiguous().to(device)
-    edge_attr_ap_to_ue = torch.tensor(beta_single_AP, dtype=torch.float).to(device)
-    edge_attr_ue_up_ap = torch.tensor(beta_single_AP, dtype=torch.float).to(device)
+    edge_attr_ap_to_ue = torch.tensor(beta_single_AP, dtype=torch.float64).to(device)
+    edge_attr_ue_up_ap = torch.tensor(beta_single_AP, dtype=torch.float64).to(device)
 
     # Create the heterogeneous graph data
     data = HeteroData()
@@ -283,8 +283,8 @@ def single_syn_het_graph(ap_feat, large_scale_feat):
     ue_features = torch.rand(num_UE, 1)  # Random feature for UE nodes (dim 1)
 
     # Concatenate features for both AP and UE nodes
-    x_ap = ap_features.to(torch.float).to(device)
-    x_ue = ue_features.to(torch.float).to(device)
+    x_ap = ap_features.to(torch.float64).to(device)
+    x_ue = ue_features.to(torch.float64).to(device)
 
     # Combine AP and UE node features
     x = {'AP': x_ap, 'UE': x_ue}
@@ -299,8 +299,8 @@ def single_syn_het_graph(ap_feat, large_scale_feat):
 
     edge_index_ap_down_ue = torch.tensor(edge_index_ap_down_ue, dtype=torch.long).t().contiguous().to(device)
     edge_index_ue_up_ap = torch.tensor(edge_index_ue_up_ap, dtype=torch.long).t().contiguous().to(device)
-    edge_attr_ap_to_ue = large_scale_feat.to(dtype=torch.float).to(device)
-    edge_attr_ue_up_ap = large_scale_feat.to(dtype=torch.float).to(device)
+    edge_attr_ap_to_ue = large_scale_feat.to(dtype=torch.float64).to(device)
+    edge_attr_ue_up_ap = large_scale_feat.to(dtype=torch.float64).to(device)
 
     # Create the heterogeneous graph data
     data = HeteroData()

@@ -2,6 +2,7 @@ import re
 import torch
 import copy 
 import random
+import torch.nn.functional as F
 from Utils.comm import (
     variance_calculate, rate_calculation, 
     component_calculate, rate_from_component
@@ -28,9 +29,14 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p,
 
     channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
     # scaling for power constraints
-    sum_weighted = torch.sum(power_matrix * channel_variance, dim=1, keepdim=True)   # shape (M,1)
-    power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
-    power_matrix /= num_antenna
+    # sum_weighted = torch.sum(power_matrix * channel_variance, dim=2, keepdim=True)   # shape (M,1)
+    # power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
+    # power_matrix /= num_antenna
+    
+    power_matrix = F.softplus(power_matrix) 
+    sum_ue = torch.sum(power_matrix * channel_variance, dim=2, keepdim=True)  # [B, M, 1]
+    alpha = torch.clamp((1.0 / num_antenna) / (sum_ue), max=1.0)   # [B, M, 1]
+    power_matrix = power_matrix * alpha 
     # power_matrix = torch.softmax(power_matrix, dim=1)
     # power_matrix = power_matrix/channel_variance
     
@@ -123,9 +129,13 @@ def fl_eval_rate(
             large_scale = large_scale * large_scale_std + large_scale_mean
             pilot_matrix = batch['UE'].x.reshape(num_graphs, num_UEs, -1)
             channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
-            sum_weighted = torch.sum(power_matrix * channel_variance, dim=1, keepdim=True)   # shape (M,1)
-            power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted)) 
-            power_matrix /= num_antenna
+            # sum_weighted = torch.sum(power_matrix * channel_variance, dim=2, keepdim=True)   # shape (M,1)
+            # power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted)) 
+            # power_matrix /= num_antenna
+            power_matrix = F.softplus(power_matrix) 
+            sum_ue = torch.sum(power_matrix * channel_variance, dim=2, keepdim=True)  # [B, M, 1]
+            alpha = torch.clamp((1.0 / num_antenna) / (sum_ue), max=1.0)   # [B, M, 1]
+            power_matrix = power_matrix * alpha 
             # power_matrix = torch.softmax(power_matrix, dim=1)
             # power_matrix = power_matrix/channel_variance
             
@@ -437,9 +447,13 @@ def get_global_info(
                 phiMatrix = batch['UE'].x.reshape(num_graphs, num_UEs, -1)
                 channelVariance = variance_calculate(largeScale, phiMatrix, tau, rho_p)
                 
-                sum_weighted = torch.sum(power * channelVariance, dim=1, keepdim=True)   # shape (M,1)
-                power = power / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
-                power /= num_antenna
+                # sum_weighted = torch.sum(power * channelVariance, dim=2, keepdim=True)   # shape (M,1)
+                # power = power / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
+                # power /= num_antenna
+                power = F.softplus(power) 
+                sum_ue = torch.sum(power * channelVariance, dim=2, keepdim=True)  # [B, M, 1]
+                alpha = torch.clamp((1.0 / num_antenna) / (sum_ue), max=1.0)   # [B, M, 1]
+                power = power * alpha 
                 
                 # power = torch.softmax(power, dim=1)
                 # power = power/channelVariance

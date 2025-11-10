@@ -1,4 +1,4 @@
-function [betas, phiis, R_cf_opt_min] = data_generation(num_sam, num_ap, num_ue, tau, power_f, Hb, Hm, f, d0, d1, D)
+function [betas, phiis, R_cf_opt_min] = data_generation(num_sam, num_ap, num_ue, num_antenna, tau, power_f, Hb, Hm, f, d0, d1, D)
     %     num_sam=1000; num_ap=50; num_ue=6; 
     %     tau=10; power_f=0.1;D=1; f=1900; Hb=15; Hm=1.65; d0=0.01;d1=0.05;
     B=20;

@@ -1,4 +1,5 @@
 import time
+from datetime import timedelta
 import os
 import argparse
 import copy
@@ -23,7 +24,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Federated Learning Script")
     
     parser.add_argument('--pre_train', type=str, default=None, help="Path to pre trained model (insinde results/models/ folder, without '.pt')")
-    parser.add_argument("--eval_same_data", action="store_true", default=False, help="Eval on the same with training data.")
+    parser.add_argument("--eval_same_data", action="store_true", default=True, help="Eval on the same with training data.")
     
     # System Parameters
     parser.add_argument('--num_ap', type=int, default=30, help="Number of access points")
@@ -49,8 +50,8 @@ def parse_args():
     
     
     # Centralized hyperparameters
-    parser.add_argument('--cen_lr', type=float, default=5e-4, help="Centralized learning rate")
-    parser.add_argument('--num_epochs_cen', type=int, default=200, help="Number of Centralized training epochs")
+    parser.add_argument('--cen_lr', type=float, default=5e-3, help="Centralized learning rate")
+    parser.add_argument('--num_epochs_cen', type=int, default=1000, help="Number of Centralized training epochs")
     
     
     # FL Algorithm Parameters
@@ -95,10 +96,11 @@ def train(timestamp):
     torch.manual_seed(args.seed)
     
     # Load data
-    file_name = f'cf_data_1000_{args.num_ue}_{args.num_ap}'
+    file_name = f'dl_data_2000_{args.num_ue}_{args.num_ap}'
     mat_data = scipy.io.loadmat('Data/' + file_name + '.mat')
     beta_all = mat_data['betas']
     phi_all = mat_data['Phii_cf'].transpose(0, 2, 1)
+    opt_rates = mat_data['R_cf_opt_min'][0]
     if args.norm_scheme == 'z_score':
         beta_mean = np.mean(beta_all)
         beta_std = np.std(beta_all)
@@ -126,6 +128,8 @@ def train(timestamp):
     test_data = create_graph(Beta_test, Phi_test, beta_mean, beta_std, 'het')
     test_loader = build_loader(test_data, args.batch_size, seed=args.seed, drop_last=True)
 
+    print(f'Avg train opt: {np.mean(opt_rates[train_idx]):0.4f}')
+    print(f'Avg eval opt: {np.mean(opt_rates[test_idx]):0.4f}')
     
     # Model Meta
     ap_dim = train_data[0][0]['AP'].x.shape[1]
@@ -283,8 +287,8 @@ def train(timestamp):
                 # )
             
             if round % eval_round == 0:
-                lrs = [opt.param_groups[0]['lr'] for opt in optimizers]
-                print(f"[Round {round+1}] client LR: mean={np.mean(lrs):.3e}  min={np.min(lrs):.3e}  max={np.max(lrs):.3e}")
+                # lrs = [opt.param_groups[0]['lr'] for opt in optimizers]
+                # print(f"[Round {round+1}] client LR: mean={np.mean(lrs):.3e}  min={np.min(lrs):.3e}  max={np.max(lrs):.3e}")
                 print(f"Round {round+1:03d}/{args.num_rounds}: "
                     f"Avg Training Loss = {avg_loss:.4f} | "
                     f"Avg Training Rate = {total_train_rate:.4f} | "
@@ -292,7 +296,8 @@ def train(timestamp):
                 )
         end_time = time.time()
         execution_time = end_time - start_time
-        print(f"Execution Time: {execution_time:.4f} seconds")
+        # print(f"Execution Time: {execution_time:.4f} seconds")
+        print(f"Execution Time: {timedelta(seconds=execution_time)}")
         
         model_filename = f'{save_dir}/{timestamp}_{args.fl_scheme}_{args.lr}_{args.num_rounds}.pt'
         # Save the model's state_dict
@@ -300,7 +305,7 @@ def train(timestamp):
         save_models(args, global_model, local_models, model_filename)
         print(f'Save file to {model_filename}.')
             
-        
+    ## Centralized GNN training   
     train_data_cen = create_graph(Beta_all, Phi_all, beta_mean, beta_std, 'het', isDecentralized=False)
     train_loader_cen = DataLoader(train_data_cen, batch_size=args.batch_size, shuffle=True)
     test_data_cen = create_graph(Beta_test, Phi_test, beta_mean, beta_std, 'het', isDecentralized=False)
@@ -332,7 +337,7 @@ def train(timestamp):
             )
             
         cen_model.train()
-        train_loss = cen_train(
+        train_loss, _ = cen_train(
             train_loader_cen, cen_model, cen_optimizer,
             tau=args.tau, rho_p=args.power_f, rho_d=args.power_f, num_antenna=args.num_antenna
         )
@@ -346,9 +351,9 @@ def train(timestamp):
             )
         
 
-    return local_models, cen_model
+    return local_models, cen_model, perm
 
-def eval(local_models, cen_model, timestamp):
+def eval(local_models, cen_model, timestamp, perm):
     
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -361,21 +366,29 @@ def eval(local_models, cen_model, timestamp):
     # Set random seeds for reproducibility
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    
     # Load data
     if args.eval_same_data:
         print('Same data eval...')
-        file_name = f'cf_data_1000_{args.num_ue}_{args.num_ap}'
+        eval_idx = perm[:args.num_eval]
+        # file_name = f'cf_data_2000_{args.num_ue}_{args.num_ap}'
+        file_name = f'dl_data_2000_{args.num_ue}_{args.num_ap}'
+        eval_mat = scipy.io.loadmat('Data/' + file_name + '.mat')
+        Beta_eval = eval_mat['betas']
+        Phi_eval = eval_mat['Phii_cf'].transpose(0,2,1)
+        
+        Beta_eval, Phi_eval = Beta_eval[eval_idx], Phi_eval[eval_idx]
+
+        opt_rates = eval_mat['R_cf_opt_min'][:, eval_idx]
     else:
         print('Different data eval...')
         file_name = f'eval_data_{args.num_eval}_{args.num_ue}_{args.num_ap}'
         # file_name = 'cf_data_1000_6_30'
     # file_name = f'eval_data_{args.num_eval}_{args.num_ue}_{args.num_ap}'
-    eval_mat = scipy.io.loadmat('Data/' + file_name + '.mat')
-    Beta_eval = eval_mat['betas'][:args.num_eval]
-    Phi_eval = eval_mat['Phii_cf'][:args.num_eval].transpose(0,2,1)
+        eval_mat = scipy.io.loadmat('Data/' + file_name + '.mat')
+        Beta_eval = eval_mat['betas'][:args.num_eval]
+        Phi_eval = eval_mat['Phii_cf'][:args.num_eval].transpose(0,2,1)
 
-    opt_rates = eval_mat['R_cf_opt_min'][:, :args.num_eval]
+        opt_rates = eval_mat['R_cf_opt_min'][:, :args.num_eval]
     
     
     if args.norm_scheme == 'z_score':
@@ -395,10 +408,10 @@ def eval(local_models, cen_model, timestamp):
 
     # Define data splits
     eval_data = create_graph(Beta_eval, Phi_eval, beta_mean_eval, beta_std_eval,  'het')
-    eval_loader = build_loader(eval_data, args.num_eval, seed=1712, drop_last=True)
+    eval_loader = build_loader(eval_data, args.num_eval, seed=1712, drop_last=False)
     
     eval_data_cen = create_graph(Beta_eval, Phi_eval, beta_mean_eval, beta_std_eval, 'het', isDecentralized=False)
-    eval_loader_cen = DataLoader(eval_data_cen, batch_size=args.num_eval, shuffle=True)  
+    eval_loader_cen = DataLoader(eval_data_cen, batch_size=args.num_eval, shuffle=False)  
     
     
     fl_rates = fl_eval_rate(
@@ -425,11 +438,18 @@ def eval(local_models, cen_model, timestamp):
             all_one_rates = all_one_rates.detach().cpu().numpy() 
             fl_rates = fl_rates.detach().cpu().numpy()
         else:
-            raise ValueError(f'{device} handling is not supported now!')
+            # raise ValueError(f'{device} handling is not supported now!')
+            gnn_rates = gnn_rates.detach().cpu().numpy() 
+            all_one_rates = all_one_rates.detach().cpu().numpy() 
+            fl_rates = fl_rates.detach().cpu().numpy()
         
+    print(f'Avg rate FL: {np.mean(fl_rates):0.4f}')
+    print(f'Avg rate centralized: {np.mean(gnn_rates):0.4f}')
+    print(f'Avg rate opt: {np.mean(opt_rates):0.4f}')
+    
     
     num_eval = args.num_eval
-    min_rate, max_rate = 0, 1.7
+    min_rate, max_rate = 0, 2
     # y_axis = np.arange(0, 1.0, 1/202)
     y_axis = np.linspace(0, 1, num_eval+2)
     gnn_rates.sort();  opt_rates.sort(); all_one_rates.sort(); fl_rates.sort()
@@ -464,9 +484,9 @@ if __name__ == '__main__':
     timestamp = time.strftime('%m_%d_%H_%M_%S', time.localtime(time.time()))
     
     
-    local_models, cen_model = train(timestamp)
+    local_models, cen_model, perm = train(timestamp)
     
-    eval(local_models, cen_model, timestamp)
+    eval(local_models, cen_model, timestamp, perm)
     
     
     

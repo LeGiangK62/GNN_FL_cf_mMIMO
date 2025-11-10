@@ -21,7 +21,7 @@ def variance_calculate(largeScale, phiMatrix, tau, rho_p):
 
 def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment, rho_d, num_antenna):
     #===========================================
-    # 
+    # sqrt of power 
     # Args:
     # powerMatrix:        power matrix of all AP and UE   [num_samples, num_AP, num_UE]
     # largeScale:         channel large scale fading      [num_samples, num_AP, num_UE]
@@ -31,8 +31,9 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment, 
     # rate:               Achievable rate of every UE     [num_samples, num_UE]
     #
     #===========================================    
-    powerMatrix = torch.sqrt(powerMatrix)
+    # powerMatrix = torch.sqrt(powerMatrix)
     SINR_num = torch.sum(powerMatrix*channelVariance, dim=1) ** 2 * (num_antenna ** 2)
+    dtype = powerMatrix.dtype
 
     powerExpanded = ((powerMatrix**2) *channelVariance).unsqueeze(-1)
     largeScaleExpanded = largeScale.unsqueeze(-2)
@@ -41,7 +42,7 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment, 
     interm_var1 = (powerMatrix * channelVariance/ largeScale).unsqueeze(-1)
     interm_var2 = largeScale.unsqueeze(-2)
     prod = torch.sum(interm_var1 * interm_var2, dim=1) ** 2
-    diag_vec = prod.diagonal(dim1=-2, dim2=-1).unsqueeze(-1) * torch.eye(powerMatrix.shape[2], device=powerMatrix.device)
+    diag_vec = prod.diagonal(dim1=-2, dim2=-1).unsqueeze(-1) * torch.eye(powerMatrix.shape[2], device=powerMatrix.device, dtype=dtype)
     
     pilotContamination = torch.bmm(
         pilotAssignment,
@@ -58,7 +59,7 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment, 
 
 # Only FL functions
 
-def rate_from_component(desiredSignal, pilotContamination, userInterference, numAntenna):
+def rate_from_component(desiredSignal, pilotContamination, userInterference, numAntenna, rho_d=0.1):
     num_graphs, num_APs, num_UEs = desiredSignal.shape
     devcie = desiredSignal.device
     dtype = desiredSignal.dtype
@@ -71,7 +72,7 @@ def rate_from_component(desiredSignal, pilotContamination, userInterference, num
 
     
     sum_PC = sum_PC ** 2
-    term1 = sum_PC * (1 - torch.eye(num_UEs, device=devcie))
+    term1 = sum_PC * (1 - torch.eye(num_UEs, device=devcie, dtype=dtype))
     term1 = (numAntenna**2) * term1.sum(dim=1)
     # term1 = (numAntenna**2) * ((sum_PC * (1 - torch.eye(num_UEs, device=devcie))).pow(2).sum(dim=1)) 
     term2 = numAntenna * sum_UI.sum(dim=1)          
@@ -82,8 +83,9 @@ def rate_from_component(desiredSignal, pilotContamination, userInterference, num
     return rate_all
     
 
-def component_calculate(power, channelVariance, largeScale, phiMatrix, rho=0.1):
+def component_calculate(power, channelVariance, largeScale, phiMatrix, rho_d=0.1):
     #################
+    # sqrt of power 
     # power                 : torch.rand(num_graphs, num_AP, num_UE)
     # channelVariance       : torch.rand(num_graphs, num_AP, num_UE)
     # largeScale            : torch.rand(num_graphs, num_AP, num_UE)
@@ -100,9 +102,9 @@ def component_calculate(power, channelVariance, largeScale, phiMatrix, rho=0.1):
         phiMatrix.transpose(1, 2),
     ).abs()
     
-    DS_all = torch.sqrt(power) * channelVariance 
+    DS_all = power * channelVariance 
 
-    tmp = power * channelVariance
+    tmp = (power**2) * channelVariance
     tmp = tmp.unsqueeze(-1)
     largeScale_expand = largeScale.unsqueeze(-2)
     UI_all = tmp * largeScale_expand
@@ -110,7 +112,7 @@ def component_calculate(power, channelVariance, largeScale, phiMatrix, rho=0.1):
     # mask = torch.eye(UI_all.size(-1), device=device).bool()
     # UI_all[:, :, mask] = 0
 
-    tmp = torch.sqrt(power) * channelVariance / largeScale
+    tmp = power * channelVariance / largeScale
     tmp = tmp.unsqueeze(-1)
 
     tmp = tmp * largeScale_expand
