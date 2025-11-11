@@ -40,15 +40,16 @@ def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_
         raise ValueError('Nan in rate')
     
     
-    min_rate, _ = torch.min(rate, dim=1)
     if eval_mode:
+        min_rate, _ = torch.min(rate, dim=1)
         full = torch.ones_like(power_matrix)
         rate_full_one = rate_calculation(full, large_scale, channel_var, phi_matrix, rho_d, num_antenna)
         min_rate_one, _ = torch.min(rate_full_one, dim=1)
         return min_rate, min_rate_one
     else:
         T = 0.2
-        # soft_min = T * torch.logsumexp(-rate / T, dim=1)
+        min_rate, _ = torch.min(rate, dim=1)
+        # min_rate = T * torch.logsumexp(-rate / T, dim=1)
         loss = torch.mean(-min_rate)
         return loss
 

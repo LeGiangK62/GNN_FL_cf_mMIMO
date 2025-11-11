@@ -2,10 +2,10 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch_geometric.nn.conv import MessagePassing
-from torch.nn import Sequential as Seq, Linear as Lin, ReLU, Sigmoid, BatchNorm1d as BN, LayerNorm, Dropout, GELU
+from torch.nn import Sequential as Seq, Linear as Lin, ReLU, Sigmoid, BatchNorm1d as BN, LayerNorm, Dropout, GELU, LeakyReLU
 from torch_geometric.nn.inits import glorot, reset
 from torch_geometric.utils import dropout_node
-
+from torch_geometric.nn import GraphNorm
 
 def MLP(channels, batch_norm=False, dropout_prob=0):
     layers = []
@@ -16,10 +16,10 @@ def MLP(channels, batch_norm=False, dropout_prob=0):
             layers.append(LayerNorm(channels[i]))
         if dropout_prob:
             layers.append(Dropout(dropout_prob))  # Add dropout after batch norm or activation
-        layers.append(ReLU())
+        # layers.append(ReLU())
         # layers.append(GELU())
         # layers.append(nn.SiLU()) # Shit
-        # layers.append(LeakyReLU(negative_slope=0.1))
+        layers.append(LeakyReLU(negative_slope=0.1))
     # layers.append(Dropout(0.3))
 
     return Seq(*layers)
@@ -58,13 +58,13 @@ class APConvLayer(MessagePassing):
             dst_dim = src_dim_dict[dst_type]
             src_init = init_channel[src_type]
             dst_init = init_channel[dst_type]
-            self.msg[src_type] = MLP([src_dim + edge_dim + dst_dim, out_channel], batch_norm=True, dropout_prob=0)
-            self.upd[dst_type] = MLP([out_channel + dst_dim, out_channel - dst_init], batch_norm=True, dropout_prob=0)
+            self.msg[src_type] = MLP([src_dim + edge_dim + dst_dim, out_channel], batch_norm=False, dropout_prob=0)
+            self.upd[dst_type] = MLP([out_channel + dst_dim, out_channel - dst_init], batch_norm=False, dropout_prob=0)
             
             self.gamma[dst_type] = nn.Parameter(torch.full((out_channel - dst_init,), 1e-3))
             
         if self.edge_conv:
-            self.edge_upd= MLP([sum(src_dim_dict.values()) + edge_dim, out_channel - self.edge_init], batch_norm=True, dropout_prob=0)
+            self.edge_upd= MLP([sum(src_dim_dict.values()) + edge_dim, out_channel - self.edge_init], batch_norm=False, dropout_prob=0)
             self.gamma_edge = nn.Parameter(torch.full((out_channel - self.edge_init,), 1e-3))
 
     def reset_parameters(self):
@@ -174,7 +174,7 @@ class APHetNet(nn.Module):
         # self.AP_gen = nn.Sequential(*[self.AP_gen, Seq(Lin(hid, 1)), Sigmoid()])
         
         if self.edge_conv:
-            self.power_edge = MLP([out_channels, hid, hid], batch_norm=True, dropout_prob=0) #  many layer => shit
+            self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0) #  many layer => shit
             self.power_edge = nn.Sequential(
                 *[
                     self.power_edge, Seq(Lin(hid, 1)), # sigmoid is not correct
@@ -190,10 +190,16 @@ class APHetNet(nn.Module):
             self.power = nn.Sequential(*[self.power, Seq(Lin(hid, 1)), Sigmoid()])
             # self.power = nn.Sequential(*[self.power, Seq(Lin(hid, 1))])
 
+        # self.norms = nn.ModuleDict({
+        #     'UE': GraphNorm(out_channels),
+        #     'AP': GraphNorm(out_channels)
+        # })
     def forward(self, batch):
         x_dict, edge_index_dict, edge_attr_dict = batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict
         for conv in self.convs:
             x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
+        # x_dict['UE'] = self.norms['UE'](x_dict['UE'])
+        # x_dict['AP'] = self.norms['AP'](x_dict['AP'])
 
         
         if self.edge_conv:

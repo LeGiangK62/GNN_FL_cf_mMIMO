@@ -48,5 +48,9 @@ Mr. Le Tung GIANG - tung.giangle99@gmail.com or giang.lt2399144@pusan.ac.kr
 
 lr 5e-3 is currently the best => try 1e-2
 
-num_gnn_layer should be 2 or 3; 4 is bad 
-remove the sigmoid in the power MLP 
+num_gnn_layer should be 2 or 3; 4 is bad; 3 is current the best
+remove the sigmoid in the power MLP en 3 layers x 64
+
+1e-2 > 5e-1 => plateue
+
+bat_norm using is better
