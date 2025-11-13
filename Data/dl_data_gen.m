@@ -1,4 +1,4 @@
-function [betas, phiis, R_cf_opt_min] = dl_data_gen(num_sam, num_ap, num_ue, num_antenna, tau, power_f, Hb, Hm, f, d0, d1, D)
+function [betas, gammas, phiis, etas, R_cf_opt_min] = dl_data_gen(num_sam, num_ap, num_ue, num_antenna, tau, power_f, Hb, Hm, f, d0, d1, D)
 
     %% Inital parameters
     M=num_ap; %number of access points
@@ -31,7 +31,10 @@ function [betas, phiis, R_cf_opt_min] = dl_data_gen(num_sam, num_ap, num_ue, num
 
 
     betas = zeros(N, M, K);
+    gammas = zeros(N, M, K);
     phiis = zeros(N, tau, K);
+    etas = zeros(N, M, K);
+
     fprintf('====== %d samples %d UEs and %d APs ... at %s \n', num_sam, num_ue, num_ap, char(datetime('now')));
     for n=1:N
         if mod(n, N/50) == 0
@@ -357,6 +360,7 @@ function [betas, phiis, R_cf_opt_min] = dl_data_gen(num_sam, num_ap, num_ue, num
             if strfind(cvx_status,'Solved') % feasible
                 % fprintf(1,'Problem is feasible ',tnext);
                 tmin = tnext;
+                eta = X.^2;
             else % not feasible
                 % fprintf(1,'Problem not feasible ',tnext);
                 tmax = tnext;
@@ -367,7 +371,9 @@ function [betas, phiis, R_cf_opt_min] = dl_data_gen(num_sam, num_ap, num_ue, num
         R_cf_opt_min(n) = log2(1+tmin);
 
         betas(n,:,:) = BETAAn;
-        phiis(n,:,:) = Phii_cf;        
+        gammas(n,:,:) = Gammaan;
+        phiis(n,:,:) = Phii_cf;  
+        etas(n,:,:) = eta;
     
     end
     

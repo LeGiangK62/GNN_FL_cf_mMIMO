@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch_geometric.nn.conv import MessagePassing
 from torch.nn import Sequential as Seq, Linear as Lin, ReLU, Sigmoid, BatchNorm1d as BN, LayerNorm, Dropout, GELU, LeakyReLU
 from torch_geometric.nn.inits import glorot, reset
-from torch_geometric.utils import dropout_node
+from torch_geometric.utils import dropout_node, dropout_edge
 from torch_geometric.nn import GraphNorm
 
 def MLP(channels, batch_norm=False, dropout_prob=0):
@@ -20,7 +20,7 @@ def MLP(channels, batch_norm=False, dropout_prob=0):
         # layers.append(GELU())
         # layers.append(nn.SiLU()) # Shit
         layers.append(LeakyReLU(negative_slope=0.1))
-    # layers.append(Dropout(0.3))
+    # layers.append(Dropout(0.5))
 
     return Seq(*layers)
     
@@ -35,6 +35,7 @@ class APConvLayer(MessagePassing):
             init_channel,
             metadata,
             edge_conv=False,
+            drop_p=0,
             **kwargs
     ):
         super().__init__(aggr='mean', **kwargs)
@@ -44,6 +45,7 @@ class APConvLayer(MessagePassing):
         self.edge_init = init_channel['edge']
         self.out_channel = out_channel
         self.src_dim_dict = src_dim_dict
+        self.drop_prob = drop_p
 
         self.msg = nn.ModuleDict() 
         self.upd = nn.ModuleDict() 
@@ -58,13 +60,22 @@ class APConvLayer(MessagePassing):
             dst_dim = src_dim_dict[dst_type]
             src_init = init_channel[src_type]
             dst_init = init_channel[dst_type]
-            self.msg[src_type] = MLP([src_dim + edge_dim + dst_dim, out_channel], batch_norm=False, dropout_prob=0)
-            self.upd[dst_type] = MLP([out_channel + dst_dim, out_channel - dst_init], batch_norm=False, dropout_prob=0)
+            self.msg[src_type] = MLP(
+                [src_dim + edge_dim, out_channel], 
+                batch_norm=False, dropout_prob=0.1
+            )
+            self.upd[dst_type] = MLP(
+                [out_channel + dst_dim, out_channel - dst_init], 
+                batch_norm=False, dropout_prob=0.1
+            )
             
             self.gamma[dst_type] = nn.Parameter(torch.full((out_channel - dst_init,), 1e-3))
             
         if self.edge_conv:
-            self.edge_upd= MLP([sum(src_dim_dict.values()) + edge_dim, out_channel - self.edge_init], batch_norm=False, dropout_prob=0)
+            self.edge_upd= MLP(
+                [sum(src_dim_dict.values()) + edge_dim, out_channel - self.edge_init], 
+                batch_norm=False, dropout_prob=0.1
+            )
             self.gamma_edge = nn.Parameter(torch.full((out_channel - self.edge_init,), 1e-3))
 
     def reset_parameters(self):
@@ -88,9 +99,25 @@ class APConvLayer(MessagePassing):
 
             x_src = x_dict[src_type]
             x_dst = x_dict[dst_type]
-
+            
+            if self.training and self.drop_prob > 0:
+                # DropEdge
+                edge_index, edge_mask  = dropout_edge(
+                    edge_index, p=self.drop_prob,
+                    training=True
+                )
+                edge_attr = edge_attr_dict[edge_type][edge_mask]
+            else:
+                edge_attr = edge_attr_dict[edge_type]
+                edge_mask = torch.ones(
+                    edge_attr.size(0),
+                    dtype=torch.bool,
+                    device=edge_attr.device,
+                )
+            # print(f'EdgeIndex: {edge_index.shape}')
+            # print(f'edge_attr: {edge_attr.shape}')
             # Node update
-            out = self.propagate(edge_index, x=(x_src, x_dst), edge_attr=edge_attr_dict[edge_type], edge_type=edge_type)
+            out = self.propagate(edge_index, x=(x_src, x_dst), edge_attr=edge_attr, edge_type=edge_type)
             tmp = torch.cat([x_dst, out], dim=1)
             tmp = self.upd[dst_type](tmp)
             src_init_dim = self.src_init_dict[dst_type]
@@ -100,18 +127,24 @@ class APConvLayer(MessagePassing):
             
             # Edge update
             if self.edge_conv:
-                edge_attr_dict[edge_type] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr_dict[edge_type])
+                if self.training and self.drop_prob > 0:
+                    edge_attr_dict[edge_type][edge_mask,:] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
+                else:
+                    edge_attr_dict[edge_type] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
         return x_dict, edge_attr_dict
 
     def message(self, x_j, x_i, edge_attr, edge_type):
         # x_j: source node
         # x_i: destination node
         src_type, _, dst_type = edge_type
-        out = torch.cat([x_j, edge_attr, x_i], dim=1)
+        out = torch.cat([x_j, edge_attr], dim=1)
         out = self.msg[src_type](out)
         return out
 
     def edge_update(self, x_j, x_i, edge_attr):
+        # print(f'Src: {x_j.shape}')
+        # print(f'Dst: {x_i.shape}')
+        # print(f'Edge: {edge_attr.shape}')
         tmp = torch.cat([x_j, edge_attr, x_i], dim=1)
         out = self.edge_upd(tmp)
         if self.out_channel == self.edge_init:
@@ -138,7 +171,8 @@ class APHetNet(nn.Module):
                 self.edge_dim,
                 out_channels, src_dim_dict,
                 [('UE', 'up', 'AP')],
-                edge_conv=edge_conv
+                edge_conv=edge_conv,
+                drop_p=0
             )
         )
         
@@ -148,7 +182,8 @@ class APHetNet(nn.Module):
                 self.edge_dim,
                 out_channels, src_dim_dict,
                 [('AP', 'down', 'UE')],
-                edge_conv=edge_conv
+                edge_conv=edge_conv,
+                drop_p=0
             )
         )
         for _ in range(num_layers):
@@ -157,7 +192,8 @@ class APHetNet(nn.Module):
                     {'UE': out_channels, 'AP': out_channels}, 
                     out_channels, out_channels, src_dim_dict, 
                     [('UE', 'up', 'AP'), ('AP', 'down', 'UE')],
-                    edge_conv=edge_conv
+                    edge_conv=edge_conv,
+                    drop_p=0.5
                 )
             else:
                 conv = APConvLayer(
@@ -170,11 +206,11 @@ class APHetNet(nn.Module):
 
         hid = hid_layers # too much is not good - 8 is bad, 4 is currently good
         
-        # self.AP_gen = MLP([out_channels, hid], batch_norm=False, dropout_prob=0.1)
+        # self.AP_gen = MLP([out_channels, hid], batch_norm=False, dropout_prob=0.5)
         # self.AP_gen = nn.Sequential(*[self.AP_gen, Seq(Lin(hid, 1)), Sigmoid()])
         
         if self.edge_conv:
-            self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0) #  many layer => shit
+            self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
             self.power_edge = nn.Sequential(
                 *[
                     self.power_edge, Seq(Lin(hid, 1)), # sigmoid is not correct
@@ -185,14 +221,24 @@ class APHetNet(nn.Module):
                 ]
             )
             
+            self.ap_gate = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
+            self.ap_gate = nn.Sequential(
+                *[
+                    self.ap_gate, Seq(Lin(hid, 1)), 
+                    Sigmoid(),
+                ]
+            )
+            
         else:
             self.power = MLP([out_channels, hid], batch_norm=True, dropout_prob=0)
             self.power = nn.Sequential(*[self.power, Seq(Lin(hid, 1)), Sigmoid()])
             # self.power = nn.Sequential(*[self.power, Seq(Lin(hid, 1))])
 
         # self.norms = nn.ModuleDict({
-        #     'UE': GraphNorm(out_channels),
-        #     'AP': GraphNorm(out_channels)
+        #     # 'UE': GraphNorm(out_channels),
+        #     # 'AP': GraphNorm(out_channels),
+        #     'UE': nn.LayerNorm(out_channels),
+        #     'AP': nn.LayerNorm(out_channels)
         # })
     def forward(self, batch):
         x_dict, edge_index_dict, edge_attr_dict = batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict
@@ -206,6 +252,7 @@ class APHetNet(nn.Module):
             edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
             # edge_power = torch.exp(edge_power)
             edge_attr_dict[('AP', 'down', 'UE')] = torch.cat([edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], dim=1)
+            x_dict['AP']  = self.ap_gate(x_dict['AP'])
         else:
             dl_power = torch.exp(self.power(x_dict['UE']))
             x_dict['UE'] = torch.cat([x_dict['UE'][:,:self.ue_dim], dl_power], dim=1)
