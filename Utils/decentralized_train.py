@@ -10,30 +10,23 @@ from Utils.comm import (
 )
 
 
-def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p, rho_d, num_antenna, isEdgeUpd):
+def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p, rho_d, num_antenna, epochRatio=1):
     num_graphs = graphData.num_graphs
     num_UEs = graphData['UE'].x.shape[0]//num_graphs
     num_APs = graphData['AP'].x.shape[0]//num_graphs
     
     
     pilot_matrix = graphData['UE'].x.reshape(num_graphs, num_UEs, -1)
-    ap_gate = nodeFeatDict['AP'].reshape(num_graphs, num_APs, -1)
     
-    if isEdgeUpd:
-        large_scale = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
-        power_matrix_raw = edgeDict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
-    else:
-        large_scale = graphData['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
-        power_matrix_raw = nodeFeatDict['UE'].reshape(num_graphs, num_UEs, -1)
-        power_matrix_raw = power_matrix_raw[:, :, -1][:, None, :]
+    large_scale = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
+    power_matrix_raw = edgeDict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
 
     large_scale = torch.expm1(large_scale)
-    channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
+    # channel_variance2 = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
+    channel_variance = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
     
-    power_matrix = power_from_raw(power_matrix_raw, ap_gate, channel_variance, num_antenna)
-    # power_matrix = torch.softmax(power_matrix, dim=1)
-    # power_matrix = power_matrix/channel_variance
-    
+    power_matrix = power_from_raw(power_matrix_raw, channel_variance, num_antenna)
+        
     DS_k, PC_k, UI_k = component_calculate(power_matrix, channel_variance, large_scale, pilot_matrix, rho_d=rho_d)
     
     all_DS = [DS_k] + [r['DS'] for r in clientResponse]
@@ -46,16 +39,25 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p,
     
     rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
     min_rate, _ = torch.min(rate, dim=1)
-    loss = torch.mean(min_rate) 
+    loss = torch.mean(-min_rate) 
+    # epochRatio = min(1.0, epochRatio)
+    
+    # min_rate, _ = torch.min(rate, dim=1)
+    # mean_rate = torch.mean(rate, dim=1)
+    # fairness = (mean_rate - min_rate)**2
+    # loss = epochRatio * torch.mean(-min_rate) + 0.01 * (1-epochRatio) * torch.mean(fairness)
 
-    return -loss
+    # Round 451/500: Avg Training Loss = -1.2951 | Avg Training Rate = 1.3053 | Avg Eval Rate = 0.7551 |
+    # min rate only
+    # Avg Training Loss = -1.0660 | Avg Training Rate = 1.0675 | Avg Eval Rate = 0.9651
+    return loss
 
 
 
 
 def fl_train(
         dataLoader, responseInfo, model, optimizer,
-        tau, rho_p, rho_d, num_antenna, isEdgeUpd=False
+        tau, rho_p, rho_d, num_antenna, epochRatio=1
     ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.train()
@@ -70,7 +72,8 @@ def fl_train(
         x_dict, attr_dict, _ = model(batch)
         loss = loss_function(
             batch, x_dict, attr_dict, response, 
-            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna, isEdgeUpd=isEdgeUpd
+            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
+            epochRatio=epochRatio
         )
         loss.backward()
         optimizer.step()
@@ -91,14 +94,16 @@ def fl_train(
 @torch.no_grad()
 def fl_eval_rate(
         dataLoader, models,
-        tau, rho_p, rho_d, num_antenna, isEdgeUpd=False,
+        tau, rho_p, rho_d, num_antenna,
         eval_mode=False
     ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     all_power = []
     all_large_scale = []
     all_phi = []
+    all_channel_var = []
     for batch_idx, batches_at_k in enumerate(zip(*dataLoader)):
+        per_batch_channel_var = []
         per_batch_power = []
         per_batch_large_scale = []
         per_batch_phi = []
@@ -112,37 +117,26 @@ def fl_eval_rate(
             # large_scale_mean, large_scale_std = batch.mean, batch.std
             
             x_dict, edge_dict, edge_index = model(batch)
-            ap_gate = x_dict['AP'].reshape(num_graphs, num_APs, -1)
-            if isEdgeUpd:
-                large_scale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
-                power_matrix_raw = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
-            else:
-                large_scale = batch['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
-                power_matrix_raw = x_dict['UE'].reshape(num_graphs, num_UEs, -1)
-                power_matrix_raw = power_matrix_raw[:, :, -1][:, None, :]
+
+            large_scale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
+            power_matrix_raw = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
                 
             large_scale = torch.expm1(large_scale)
     
             pilot_matrix = batch['UE'].x.reshape(num_graphs, num_UEs, -1)
-            channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
-            # # sum_weighted = torch.sum(power_matrix * channel_variance, dim=2, keepdim=True)   # shape (M,1)
-            # # power_matrix = power_matrix / torch.maximum(sum_weighted, torch.ones_like(sum_weighted)) 
-            # # power_matrix /= num_antenna
-            # power_matrix = F.softplus(power_matrix) 
-            # sum_ue = torch.sum(power_matrix * channel_variance, dim=2, keepdim=True)  # [B, M, 1]
-            # alpha = torch.clamp((1.0 / num_antenna) / (sum_ue), max=1.0)   # [B, M, 1]
-            # power_matrix = power_matrix * alpha 
-            # # power_matrix = torch.softmax(power_matrix, dim=1)
-            # # power_matrix = power_matrix/channel_variance
-            power_matrix = power_from_raw(power_matrix_raw, ap_gate, channel_variance, num_antenna)
-            
+            # channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
+            channel_variance = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
+
+            power_matrix = power_from_raw(power_matrix_raw, channel_variance, num_antenna)
             per_batch_power.append(power_matrix)
             per_batch_large_scale.append(large_scale)
+            per_batch_channel_var.append(channel_variance)
             per_batch_phi.append(pilot_matrix.unsqueeze(1))
             
         per_batch_phi = torch.cat(per_batch_phi, dim=1) 
         per_batch_power = torch.cat(per_batch_power, dim=1)
         per_batch_large_scale = torch.cat(per_batch_large_scale, dim=1)
+        per_batch_channel_var = torch.cat(per_batch_channel_var, dim=1)
         
         if per_batch_phi.shape[1] > 1:
             ref = per_batch_phi[:, 0, :, :]
@@ -154,24 +148,43 @@ def fl_eval_rate(
          
         all_power.append(per_batch_power)
         all_large_scale.append(per_batch_large_scale)
-        all_phi.append(per_batch_phi)
+        all_channel_var.append(per_batch_channel_var)
+        all_phi.append(per_batch_phi[:,0,:,:])
+        
+    all_power = torch.cat(all_power, dim=0)
+    all_large_scale = torch.cat(all_large_scale, dim=0)
+    all_channel_var = torch.cat(all_channel_var, dim=0)
+    all_phi = torch.cat(all_phi, dim=0)
     
-    total_min_rate = 0.0
-    total_samples = 0.0
-    for each_power, each_large_scale, each_phi in zip(all_power, all_large_scale, all_phi):
-        num_graphs = len(each_power)
-        each_phi = each_phi[:,0,:,:]
-        each_channel_variance = variance_calculate(each_large_scale, each_phi, tau=tau, rho_p=rho_p)
-        all_DS, all_PC, all_UI = component_calculate(each_power, each_channel_variance, each_large_scale, each_phi, rho_d=rho_d)
-        # rate = rate_calculation(each_power, each_large_scale, each_channel_variance, each_phi, rho_d=rho_d, num_antenna=num_antenna)
-        rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
-        min_rate, _ = torch.min(rate, dim=1)
-        if eval_mode: return min_rate
+    all_DS, all_PC, all_UI = component_calculate(all_power, all_channel_var, all_large_scale, all_phi, rho_d=rho_d)
+    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
+    min_rate, _ = torch.min(rate, dim=1)
+    
+    if eval_mode: 
+        return min_rate
+    else:
         min_rate = torch.mean(min_rate)
-        total_min_rate += min_rate.item() * num_graphs
-        total_samples += num_graphs
+        return min_rate
+    
+    
+    
+    
+    # total_min_rate = 0.0
+    # total_samples = 0.0
+    # for each_power, each_large_scale, each_phi, each_channel_variance in zip(all_power, all_large_scale, all_phi, all_channel_var):
+    #     num_graphs = len(each_power)
+    #     each_phi = each_phi[:,0,:,:]
+    #     # each_channel_variance = variance_calculate(each_large_scale, each_phi, tau=tau, rho_p=rho_p)
+    #     all_DS, all_PC, all_UI = component_calculate(each_power, each_channel_variance, each_large_scale, each_phi, rho_d=rho_d)
+    #     # rate = rate_calculation(each_power, each_large_scale, each_channel_variance, each_phi, rho_d=rho_d, num_antenna=num_antenna)
+    #     rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
+    #     min_rate, _ = torch.min(rate, dim=1)
+    #     if eval_mode: return min_rate
+    #     min_rate = torch.mean(min_rate)
+    #     total_min_rate += min_rate.item() * num_graphs
+    #     total_samples += num_graphs
 
-    return total_min_rate/total_samples
+    # return total_min_rate/total_samples
 
 
 # FL functions
@@ -412,7 +425,7 @@ class FedProx:
 
 def get_global_info(
         loaderData, localModels, optimizers,
-        tau, rho_p, rho_d, num_antenna, isEdgeUpd
+        tau, rho_p, rho_d, num_antenna
     ):
     num_client = len(localModels)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -431,31 +444,17 @@ def get_global_info(
                 num_graphs = batch.num_graphs
                 num_UEs = x_dict['UE'].shape[0] // num_graphs
                 num_APs = x_dict['AP'].shape[0] // num_graphs
-                ap_gate = x_dict['AP'].reshape(num_graphs, num_APs, -1)
                 
-                if isEdgeUpd:
-                    largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
-                    power = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
-                else:
-                    largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs)
-                    power = x_dict['UE'].reshape(num_graphs, num_UEs, -1)[:, :, -1][:, None, :]
+                largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
+                power = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
                     
                 largeScale = torch.expm1(largeScale)
                 phiMatrix = batch['UE'].x.reshape(num_graphs, num_UEs, -1)
-                channelVariance = variance_calculate(largeScale, phiMatrix, tau, rho_p)
+                # channelVariance = variance_calculate(largeScale, phiMatrix, tau, rho_p)
+                channelVariance = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
+
                 
-                # sum_weighted = torch.sum(power * channelVariance, dim=2, keepdim=True)   # shape (M,1)
-                # power = power / torch.maximum(sum_weighted, torch.ones_like(sum_weighted))
-                # power /= num_antenna
-                # power = F.softplus(power) 
-                # sum_ue = torch.sum(power * channelVariance, dim=2, keepdim=True)  # [B, M, 1]
-                # alpha = torch.clamp((1.0 / num_antenna) / (sum_ue), max=1.0)   # [B, M, 1]
-                # power = power * alpha 
-                
-                power = power_from_raw(power, ap_gate, channelVariance, num_antenna)
-                # power = torch.softmax(power, dim=1)
-                # power = power/channelVariance
-    
+                power = power_from_raw(power, channelVariance, num_antenna)
 
                 DS_single, PC_single, UI_single = component_calculate(power, channelVariance, largeScale, phiMatrix, rho_d=rho_d)
                 ##

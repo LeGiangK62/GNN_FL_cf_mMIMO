@@ -57,24 +57,28 @@ def rate_calculation(powerMatrix, largeScale, channelVariance, pilotAssignment, 
     rate = torch.log2(1 + SINR_num/SINR_denom)
     return rate
 
-def power_from_raw(rawMatrix, apRaw, channelVarMatrix, num_antenna=1):
+def power_from_raw(rawMatrix, channelVarMatrix, num_antenna=1):
     p_max = (1.0 / num_antenna) ** 0.5
     
     # Option 1
-    # den = torch.logsumexp(rawMatrix + torch.log(channelVarMatrix), dim=2, keepdim=True)
-    # term_1 = torch.exp(0.5 * (rawMatrix - den))
-    # term_2 = torch.sigmoid(torch.sum(rawMatrix, dim=2, keepdim=True))
-    # term_2 = term_2 ** 0.5
-    # power_matrix = p_max  * term_1  * term_2 # Sqrt of power 
+    den = torch.logsumexp(rawMatrix + torch.log(channelVarMatrix), dim=2, keepdim=True)
+    term_1 = torch.exp(0.5 * (rawMatrix - den))
+    term_2 = torch.sigmoid(torch.sum(rawMatrix, dim=2, keepdim=True))
+    term_2 = term_2 ** 0.5
+    power_matrix = p_max  * term_1  * term_2 # Sqrt of power 
     
     # Option 2
-    # z = torch.softmax(torch.exp(rawMatrix)*channelVarMatrix, dim=2)
-    z = torch.softmax(rawMatrix + torch.log(channelVarMatrix), dim=2)
-    term_1 = z / channelVarMatrix
-    # gate_raw = rawMatrix.sum(dim=2, keepdim=True) 
-    # term_2 = torch.sigmoid(gate_raw) ** 0.5
-    term_2 = apRaw ** 0.5
-    power_matrix = p_max * (term_1 ** 0.5) * term_2
+    # sqrt_p_unnorm = torch.nn.functional.softplus(rawMatrix)
+    # power_unnorm = sqrt_p_unnorm**2
+    # den = (power_unnorm * channelVarMatrix).sum(dim=2, keepdim=True)
+    # scale = torch.clamp(p_max**2 / den, max=1.0)
+    # power_matrix = sqrt_p_unnorm * torch.sqrt(scale) 
+    
+    # Option 3
+    # z = torch.softmax(rawMatrix + torch.log(channelVarMatrix), dim=2)
+    # term_1 = z / channelVarMatrix
+    # term_2 = apRaw # ** 0.5 # No need sqrt, since apRaw in range 0 to 1
+    # power_matrix = p_max * (term_1 ** 0.5) * term_2
     
     return power_matrix
 

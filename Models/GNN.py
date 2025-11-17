@@ -20,8 +20,6 @@ def MLP(channels, batch_norm=False, dropout_prob=0):
         # layers.append(GELU())
         # layers.append(nn.SiLU()) # Shit
         layers.append(LeakyReLU(negative_slope=0.1))
-    # layers.append(Dropout(0.5))
-
     return Seq(*layers)
     
     
@@ -34,12 +32,10 @@ class APConvLayer(MessagePassing):
             out_channel,
             init_channel,
             metadata,
-            edge_conv=False,
             drop_p=0,
             **kwargs
     ):
         super().__init__(aggr='mean', **kwargs)
-        self.edge_conv = edge_conv
         self.metadata = metadata
         self.src_init_dict = init_channel
         self.edge_init = init_channel['edge']
@@ -61,31 +57,29 @@ class APConvLayer(MessagePassing):
             src_init = init_channel[src_type]
             dst_init = init_channel[dst_type]
             self.msg[src_type] = MLP(
-                [src_dim + edge_dim, out_channel], 
+                [src_dim + edge_dim, hidden], 
                 batch_norm=False, dropout_prob=0.1
             )
             self.upd[dst_type] = MLP(
-                [out_channel + dst_dim, out_channel - dst_init], 
+                [hidden + dst_dim, out_channel - dst_init], 
                 batch_norm=False, dropout_prob=0.1
             )
             
-            self.gamma[dst_type] = nn.Parameter(torch.full((out_channel - dst_init,), 1e-3))
+            # self.gamma[dst_type] = nn.Parameter(torch.full((out_channel - dst_init,), 1e-3))
             
-        if self.edge_conv:
-            self.edge_upd= MLP(
-                [sum(src_dim_dict.values()) + edge_dim, out_channel - self.edge_init], 
-                batch_norm=False, dropout_prob=0.1
-            )
-            self.gamma_edge = nn.Parameter(torch.full((out_channel - self.edge_init,), 1e-3))
+        self.edge_upd= MLP(
+            [sum(src_dim_dict.values()) + edge_dim, out_channel - self.edge_init], 
+            batch_norm=False, dropout_prob=0.1
+        )
+        # self.gamma_edge = nn.Parameter(torch.full((out_channel - self.edge_init,), 1e-3))
 
     def reset_parameters(self):
         super().reset_parameters()
         reset(self.msg)
         reset(self.upd)
-        reset(self.gamma)
-        if self.edge_conv:
-            reset(self.edge_upd)
-            reset(self.gamma_edge)
+        # reset(self.gamma)
+        reset(self.edge_upd)
+            # reset(self.gamma_edge)
 
     def forward(
             self,
@@ -100,37 +94,41 @@ class APConvLayer(MessagePassing):
             x_src = x_dict[src_type]
             x_dst = x_dict[dst_type]
             
-            if self.training and self.drop_prob > 0:
-                # DropEdge
-                edge_index, edge_mask  = dropout_edge(
-                    edge_index, p=self.drop_prob,
-                    training=True
-                )
-                edge_attr = edge_attr_dict[edge_type][edge_mask]
-            else:
-                edge_attr = edge_attr_dict[edge_type]
-                edge_mask = torch.ones(
-                    edge_attr.size(0),
-                    dtype=torch.bool,
-                    device=edge_attr.device,
-                )
-            # print(f'EdgeIndex: {edge_index.shape}')
-            # print(f'edge_attr: {edge_attr.shape}')
+            edge_attr = edge_attr_dict[edge_type]
+            
+            
+            # if self.training and self.drop_prob > 0:
+            #     # DropEdge
+            #     edge_index, edge_mask  = dropout_edge(
+            #         edge_index, p=self.drop_prob,
+            #         training=True
+            #     )
+            #     edge_attr = edge_attr_dict[edge_type][edge_mask]
+            # else:
+            #     edge_attr = edge_attr_dict[edge_type]
+            #     edge_mask = torch.ones(
+            #         edge_attr.size(0),
+            #         dtype=torch.bool,
+            #         device=edge_attr.device,
+            #     )
+
             # Node update
-            out = self.propagate(edge_index, x=(x_src, x_dst), edge_attr=edge_attr, edge_type=edge_type)
-            tmp = torch.cat([x_dst, out], dim=1)
+            msg = self.propagate(edge_index, x=(x_src, x_dst), edge_attr=edge_attr, edge_type=edge_type)
+            tmp = torch.cat([x_dst, msg], dim=1)
             tmp = self.upd[dst_type](tmp)
             src_init_dim = self.src_init_dict[dst_type]
             if self.src_dim_dict[dst_type] == self.out_channel:
-                tmp = tmp + self.gamma[dst_type] * x_dst[:,src_init_dim:]
+                tmp = tmp +  x_dst[:,src_init_dim:] # * self.gamma[dst_type]
             x_dict[dst_type] = torch.cat([x_dst[:,:src_init_dim], tmp], dim=1)
             
+            
+            
             # Edge update
-            if self.edge_conv:
-                if self.training and self.drop_prob > 0:
-                    edge_attr_dict[edge_type][edge_mask,:] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
-                else:
-                    edge_attr_dict[edge_type] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
+            edge_attr_dict[edge_type] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
+            # if self.training and self.drop_prob > 0:
+            #     edge_attr_dict[edge_type][edge_mask,:] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
+            # else:
+            #     edge_attr_dict[edge_type] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
         return x_dict, edge_attr_dict
 
     def message(self, x_j, x_i, edge_attr, edge_type):
@@ -142,21 +140,17 @@ class APConvLayer(MessagePassing):
         return out
 
     def edge_update(self, x_j, x_i, edge_attr):
-        # print(f'Src: {x_j.shape}')
-        # print(f'Dst: {x_i.shape}')
-        # print(f'Edge: {edge_attr.shape}')
         tmp = torch.cat([x_j, edge_attr, x_i], dim=1)
         out = self.edge_upd(tmp)
         if self.out_channel == self.edge_init:
-            out = out + self.gamma_edge * edge_attr
+            out = out + edge_attr # * self.gamma_edge
         out = torch.cat([edge_attr[:,:self.edge_init], out], dim=1)
         return out
 
 
 class APHetNet(nn.Module):
-    def __init__(self, metadata, dim_dict, out_channels, num_layers=0, hid_layers=4, edge_conv=False):
+    def __init__(self, metadata, dim_dict, out_channels, num_layers=0, hid_layers=4):
         super(APHetNet, self).__init__()
-        self.edge_conv = edge_conv
         src_dim_dict = dim_dict
 
         self.ue_dim = src_dim_dict['UE']
@@ -171,8 +165,7 @@ class APHetNet(nn.Module):
                 self.edge_dim,
                 out_channels, src_dim_dict,
                 [('UE', 'up', 'AP')],
-                edge_conv=edge_conv,
-                drop_p=0
+                # drop_p=0
             )
         )
         
@@ -182,80 +175,49 @@ class APHetNet(nn.Module):
                 self.edge_dim,
                 out_channels, src_dim_dict,
                 [('AP', 'down', 'UE')],
-                edge_conv=edge_conv,
-                drop_p=0
+                # drop_p=0
             )
         )
         for _ in range(num_layers):
-            if self.edge_conv:
-                conv = APConvLayer(
-                    {'UE': out_channels, 'AP': out_channels}, 
-                    out_channels, out_channels, src_dim_dict, 
-                    [('UE', 'up', 'AP'), ('AP', 'down', 'UE')],
-                    edge_conv=edge_conv,
-                    drop_p=0.5
-                )
-            else:
-                conv = APConvLayer(
-                    {'UE': out_channels, 'AP': out_channels}, 
-                    self.edge_dim, out_channels, src_dim_dict, 
-                    [('UE', 'up', 'AP'), ('AP', 'down', 'UE')]
-                )
+            conv = APConvLayer(
+                {'UE': out_channels, 'AP': out_channels}, 
+                out_channels, out_channels, src_dim_dict, 
+                [('UE', 'up', 'AP'), ('AP', 'down', 'UE')],
+                # drop_p=0.2
+            )
             self.convs.append(conv)
 
 
         hid = hid_layers # too much is not good - 8 is bad, 4 is currently good
         
-        # self.AP_gen = MLP([out_channels, hid], batch_norm=False, dropout_prob=0.5)
-        # self.AP_gen = nn.Sequential(*[self.AP_gen, Seq(Lin(hid, 1)), Sigmoid()])
+        self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
+        self.power_edge = nn.Sequential(
+            *[
+                self.power_edge, Seq(Lin(hid, 1)), 
+            ]
+        )
         
-        if self.edge_conv:
-            self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
-            self.power_edge = nn.Sequential(
-                *[
-                    self.power_edge, Seq(Lin(hid, 1)), # sigmoid is not correct
-                    # Sigmoid(),
-                    #  nn.Softplus(),
-                    #  nn.LeakyReLU(0.1),
-                    #  nn.SiLU(0.1)
-                ]
-            )
+        # self.ap_gate = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
+        # self.ap_gate = nn.Sequential(
+        #     *[
+        #         self.ap_gate, Seq(Lin(hid, 1)), 
+        #         Sigmoid(),
+        #     ]
+        # )
             
-            self.ap_gate = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
-            self.ap_gate = nn.Sequential(
-                *[
-                    self.ap_gate, Seq(Lin(hid, 1)), 
-                    Sigmoid(),
-                ]
-            )
-            
-        else:
-            self.power = MLP([out_channels, hid], batch_norm=True, dropout_prob=0)
-            self.power = nn.Sequential(*[self.power, Seq(Lin(hid, 1)), Sigmoid()])
-            # self.power = nn.Sequential(*[self.power, Seq(Lin(hid, 1))])
-
-        # self.norms = nn.ModuleDict({
-        #     # 'UE': GraphNorm(out_channels),
-        #     # 'AP': GraphNorm(out_channels),
-        #     'UE': nn.LayerNorm(out_channels),
-        #     'AP': nn.LayerNorm(out_channels)
-        # })
+        
     def forward(self, batch):
         x_dict, edge_index_dict, edge_attr_dict = batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict
         for conv in self.convs:
             x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
-        # x_dict['UE'] = self.norms['UE'](x_dict['UE'])
-        # x_dict['AP'] = self.norms['AP'](x_dict['AP'])
-
         
-        if self.edge_conv:
-            edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
-            # edge_power = torch.exp(edge_power)
-            edge_attr_dict[('AP', 'down', 'UE')] = torch.cat([edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], dim=1)
-            x_dict['AP']  = self.ap_gate(x_dict['AP'])
-        else:
-            dl_power = torch.exp(self.power(x_dict['UE']))
-            x_dict['UE'] = torch.cat([x_dict['UE'][:,:self.ue_dim], dl_power], dim=1)
-        # x_dict['AP'] = self.AP_gen(x_dict['AP'])
+        edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
+        # edge_power = torch.exp(edge_power)
+        edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
+            [edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], 
+            dim=1
+        )
+        # x_dict['AP']  = self.ap_gate(x_dict['AP'])
+
 
         return x_dict, edge_attr_dict, edge_index_dict
