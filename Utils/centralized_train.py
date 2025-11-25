@@ -21,7 +21,7 @@ def cen_loss_function(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_
     large_scale = torch.expm1(large_scale)
     power_matrix_raw = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,-1]
     # ap_gate = nodeFeatDict['AP'].reshape(num_graph, num_APs, -1)
-    phi_matrix = graphData['UE'].x.reshape(num_graph, num_UEs, -1)
+    phi_matrix = graphData['UE'].x[:,:tau].reshape(num_graph, num_UEs, -1)
     # channel_var = variance_calculate(large_scale, phi_matrix, tau=tau, rho_p=rho_p)
     channel_var = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,1]
     # p_max = (1.0 / num_antenna) ** 0.5

@@ -149,15 +149,20 @@ class APConvLayer(MessagePassing):
 
 
 class APHetNet(nn.Module):
-    def __init__(self, metadata, dim_dict, out_channels, num_layers=0, hid_layers=4):
+    def __init__(self, metadata, dim_dict, out_channels, num_layers=0, hid_layers=4, isDecentralized=False):
         super(APHetNet, self).__init__()
-        src_dim_dict = dim_dict
+        src_dim_dict = dim_dict.copy()
 
         self.ue_dim = src_dim_dict['UE']
         self.ap_dim = src_dim_dict['AP']
         self.edge_dim = src_dim_dict['edge']
+        
+        self.gap_dim = src_dim_dict['GAP']
+        self.gap_edge_dim = src_dim_dict['GAP_edge']
+        ## The dummy 
+        # src_dim_dict['edge'] = dim_dict['edge'] - 1 # dummy power
 
-        self.convs = torch.nn.ModuleList()
+        self.convs = torch.nn.ModuleList()        
         # First Layer to update RRU
         self.convs.append(
             APConvLayer(
@@ -178,6 +183,29 @@ class APHetNet(nn.Module):
                 # drop_p=0
             )
         )
+        
+        # Layers for Global AP
+        if isDecentralized:
+            self.convs.append(
+                APConvLayer(
+                    {'GAP': self.gap_dim, 'UE': out_channels},
+                    self.gap_edge_dim,
+                    out_channels, src_dim_dict,
+                    [('UE', 'g_up', 'GAP')],
+                )
+            )
+            
+            self.convs.append(
+                APConvLayer(
+                    {'GAP': out_channels, 'UE': out_channels},
+                    self.gap_edge_dim,
+                    out_channels, src_dim_dict,
+                    [('GAP', 'g_down', 'UE')],
+                )
+            )
+    
+        
+        # Multiple conv layer for AP - UE
         for _ in range(num_layers):
             conv = APConvLayer(
                 {'UE': out_channels, 'AP': out_channels}, 
@@ -197,11 +225,11 @@ class APHetNet(nn.Module):
             ]
         )
         
+
         # self.ap_gate = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
         # self.ap_gate = nn.Sequential(
         #     *[
         #         self.ap_gate, Seq(Lin(hid, 1)), 
-        #         Sigmoid(),
         #     ]
         # )
             

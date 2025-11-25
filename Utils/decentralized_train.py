@@ -3,6 +3,9 @@ import torch
 import copy 
 import random
 import torch.nn.functional as F
+from torch_geometric.loader import DataLoader
+from torch_geometric.data import Batch
+from Utils.data_gen import full_het_graph
 from Utils.comm import (
     variance_calculate, rate_calculation, 
     component_calculate, rate_from_component,
@@ -11,12 +14,13 @@ from Utils.comm import (
 
 
 def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p, rho_d, num_antenna, epochRatio=1):
+    criterion = torch.nn.MSELoss(reduction='mean') 
     num_graphs = graphData.num_graphs
     num_UEs = graphData['UE'].x.shape[0]//num_graphs
     num_APs = graphData['AP'].x.shape[0]//num_graphs
+    # label_power = graphData.y
     
-    
-    pilot_matrix = graphData['UE'].x.reshape(num_graphs, num_UEs, -1)
+    pilot_matrix = graphData['UE'].x[:,:tau].reshape(num_graphs, num_UEs, -1)
     
     large_scale = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
     power_matrix_raw = edgeDict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
@@ -25,32 +29,40 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p,
     # channel_variance2 = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
     channel_variance = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
     
+    power_matrix_raw = power_matrix_raw[:,:1,:]
+    channel_variance = channel_variance[:,:1,:]
+    large_scale = large_scale[:,:1,:]
+    
     power_matrix = power_from_raw(power_matrix_raw, channel_variance, num_antenna)
-        
     DS_k, PC_k, UI_k = component_calculate(power_matrix, channel_variance, large_scale, pilot_matrix, rho_d=rho_d)
     
     all_DS = [DS_k] + [r['DS'] for r in clientResponse]
     all_PC = [PC_k] + [r['PC'] for r in clientResponse]
     all_UI = [UI_k] + [r['UI'] for r in clientResponse]
-
+        
     all_DS = torch.cat(all_DS, dim=1)
     all_PC = torch.cat(all_PC, dim=1)   
     all_UI = torch.cat(all_UI, dim=1) 
     
     rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
-    min_rate, _ = torch.min(rate, dim=1)
-    loss = torch.mean(-min_rate) 
+    min_rate_detach, _ = torch.min(rate.detach(), dim=1)
+    
+    
+    
+    
+    # loss_mse = criterion(power_matrix, label_power)
     # epochRatio = min(1.0, epochRatio)
     
+    # Option 1: hard-min
     # min_rate, _ = torch.min(rate, dim=1)
-    # mean_rate = torch.mean(rate, dim=1)
-    # fairness = (mean_rate - min_rate)**2
-    # loss = epochRatio * torch.mean(-min_rate) + 0.01 * (1-epochRatio) * torch.mean(fairness)
-
-    # Round 451/500: Avg Training Loss = -1.2951 | Avg Training Rate = 1.3053 | Avg Eval Rate = 0.7551 |
-    # min rate only
-    # Avg Training Loss = -1.0660 | Avg Training Rate = 1.0675 | Avg Eval Rate = 0.9651
-    return loss
+    # loss = torch.mean(-min_rate) 
+    
+    # Option 2: soft-min
+    T = 0.7 # bigger = better
+    soft_min = -T * torch.logsumexp(-rate / T, dim=1)  # [B]
+    loss = -soft_min.mean() 
+    
+    return loss, torch.mean(min_rate_detach)
 
 
 
@@ -64,13 +76,14 @@ def fl_train(
     
     local_gradients = {}
     total_loss = 0.0
+    total_min_rate = 0.0
     total_graphs = 0
     for batch, response in zip(dataLoader , responseInfo):
         batch = batch.to(device)
         num_graph = batch.num_graphs
         optimizer.zero_grad() 
         x_dict, attr_dict, _ = model(batch)
-        loss = loss_function(
+        loss, min_rate = loss_function(
             batch, x_dict, attr_dict, response, 
             tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
             epochRatio=epochRatio
@@ -86,9 +99,10 @@ def fl_train(
                     local_gradients[name] += param.grad.clone()
     
         total_loss += loss.item() * num_graph
+        total_min_rate += min_rate.item() * num_graph
         total_graphs += num_graph
 
-    return total_loss/total_graphs, local_gradients
+    return total_loss/total_graphs, total_min_rate/total_graphs, local_gradients
 
 
 @torch.no_grad()
@@ -102,6 +116,14 @@ def fl_eval_rate(
     all_large_scale = []
     all_phi = []
     all_channel_var = []
+    
+    # send_to_server = get_global_info(
+    #     dataLoader, models,  
+    #     tau=tau, rho_p=rho_p, rho_d=rho_d, 
+    #     num_antenna=num_antenna
+    # )
+    # kg_dataLoader = kg_augmentation(dataLoader, send_to_server, tau)
+    
     for batch_idx, batches_at_k in enumerate(zip(*dataLoader)):
         per_batch_channel_var = []
         per_batch_power = []
@@ -114,21 +136,26 @@ def fl_eval_rate(
             num_graphs = batch.num_graphs
             num_UEs = batch['UE'].x.shape[0]//num_graphs
             num_APs = batch['AP'].x.shape[0]//num_graphs
-            # large_scale_mean, large_scale_std = batch.mean, batch.std
             
             x_dict, edge_dict, edge_index = model(batch)
 
             large_scale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
-            power_matrix_raw = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
+            local_power_matrix_raw = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
                 
             large_scale = torch.expm1(large_scale)
     
-            pilot_matrix = batch['UE'].x.reshape(num_graphs, num_UEs, -1)
+            pilot_matrix = batch['UE'].x[:,:tau].reshape(num_graphs, num_UEs, -1)
             # channel_variance = variance_calculate(large_scale, pilot_matrix, tau, rho_p)
             channel_variance = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
+            
+            local_power_matrix_raw = local_power_matrix_raw[:,:1,:]
+            channel_variance = channel_variance[:,:1,:]
+            large_scale = large_scale[:,:1,:]
+            
+            
+            local_power_matrix = power_from_raw(local_power_matrix_raw, channel_variance, num_antenna)
 
-            power_matrix = power_from_raw(power_matrix_raw, channel_variance, num_antenna)
-            per_batch_power.append(power_matrix)
+            per_batch_power.append(local_power_matrix)
             per_batch_large_scale.append(large_scale)
             per_batch_channel_var.append(channel_variance)
             per_batch_phi.append(pilot_matrix.unsqueeze(1))
@@ -198,75 +225,136 @@ def average_weights(local_weights):
     return avg_weights
 
 
+# class FedAdam:
+#     def __init__(self, global_model, client_fraction=0.3, seed=None,
+#                  lr=1e-2, beta1=0.9, beta2=0.99, eps=1e-8):
+#         self.client_fraction = client_fraction
+#         if seed is not None:
+#             random.seed(seed)
+#         self.lr, self.beta1, self.beta2, self.eps = lr, beta1, beta2, eps
+#         self.t = 0  # step counter
+
+#         # moments only for updatable float params (skip BN buffers and personal layers)
+#         def _updatable(k, v):
+#             if not torch.is_floating_point(v): return False
+#             if 'convs_per' in k: return False
+#             if any(s in k for s in ('running_mean','running_var','num_batches_tracked')): return False
+#             return True
+
+#         templ = global_model.state_dict()
+#         self.m = {k: torch.zeros_like(v) for k, v in templ.items() if _updatable(k, v)}
+#         self.v = {k: torch.zeros_like(v) for k, v in templ.items() if _updatable(k, v)}
+
+#     @torch.no_grad()
+#     def sample_clients(self, num_clients):
+#         n = max(1, int(self.client_fraction * num_clients))
+#         return sorted(random.sample(range(num_clients), n))
+
+#     @torch.no_grad()
+#     def aggregate(self, global_model, local_weights):
+#         """
+#         local_weights: list of state_dicts from SELECTED clients (already filtered in main).
+#         """
+#         # FedAvg over selected clients (skip BN/personal & non-float)
+#         avg = copy.deepcopy(local_weights[0])
+#         def _skip(k, v):
+#             return (
+#                 'convs_per' in k or
+#                 not torch.is_floating_point(v) or
+#                 any(s in k for s in ('running_mean','running_var','num_batches_tracked'))
+#             )
+
+#         for k in avg.keys():
+#             # if _skip(k, avg[k]): continue
+#             for w in local_weights[1:]:
+#                 avg[k] += w[k]
+#             avg[k] /= float(len(local_weights))
+
+#         # "gradient" = global - avg
+#         g = {}
+#         for k, v in global_model.state_dict().items():
+#             # if _skip(k, v): continue
+#             g[k] = v - avg[k]
+
+#         # Adam moments + bias correction
+#         self.t += 1
+#         b1t = 1.0 - (self.beta1 ** self.t)
+#         b2t = 1.0 - (self.beta2 ** self.t)
+
+#         new_state = {}
+#         for k, v in global_model.state_dict().items():
+#             # if _skip(k, v):
+#             #     new_state[k] = v
+#             #     continue
+#             self.m[k] = self.beta1 * self.m[k] + (1 - self.beta1) * g[k]
+#             self.v[k] = self.beta2 * self.v[k] + (1 - self.beta2) * (g[k] * g[k])
+#             m_hat = self.m[k] / b1t
+#             v_hat = self.v[k] / b2t
+#             new_state[k] = v - self.lr * m_hat / (torch.sqrt(v_hat) + self.eps)
+
+#         global_model.load_state_dict(new_state)
+#         return copy.deepcopy(global_model.state_dict())
+    
 class FedAdam:
-    def __init__(self, global_model, client_fraction=0.3, seed=None,
-                 lr=1e-2, beta1=0.9, beta2=0.99, eps=1e-8):
+    def __init__(self, client_fraction=0.3, lr=1e-3, beta1=0.9, beta2=0.99, eps=1e-8):
         self.client_fraction = client_fraction
-        if seed is not None:
-            random.seed(seed)
-        self.lr, self.beta1, self.beta2, self.eps = lr, beta1, beta2, eps
-        self.t = 0  # step counter
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        
+        self.m = {}   # first moment
+        self.v = {}   # second moment
+        self.t = 0    # timestep
 
-        # moments only for updatable float params (skip BN buffers and personal layers)
-        def _updatable(k, v):
-            if not torch.is_floating_point(v): return False
-            if 'convs_per' in k: return False
-            if any(s in k for s in ('running_mean','running_var','num_batches_tracked')): return False
-            return True
+    @torch.no_grad()
+    def aggregate(self, global_model, local_weights):
+        """
+        global_model: nn.Module
+        local_weights: list of state_dict from selected clients
+        """
 
-        templ = global_model.state_dict()
-        self.m = {k: torch.zeros_like(v) for k, v in templ.items() if _updatable(k, v)}
-        self.v = {k: torch.zeros_like(v) for k, v in templ.items() if _updatable(k, v)}
+        # 1. FedAvg weights
+        avg_state = copy.deepcopy(local_weights[0])
+        for k in avg_state.keys():
+            if not torch.is_floating_point(avg_state[k]): 
+                continue
+            for i in range(1, len(local_weights)):
+                avg_state[k] += local_weights[i][k]
+            avg_state[k] /= float(len(local_weights))
+
+        # 2. Compute pseudo-gradient Δ = global - avg
+        grad = {}
+        g_state = global_model.state_dict()
+        for k in avg_state.keys():
+            if not torch.is_floating_point(avg_state[k]):
+                continue
+            grad[k] = g_state[k] - avg_state[k]
+
+        # 3. Adam updates
+        self.t += 1
+        for k in grad.keys():
+            if k not in self.m:
+                self.m[k] = torch.zeros_like(grad[k])
+                self.v[k] = torch.zeros_like(grad[k])
+
+            self.m[k] = self.beta1 * self.m[k] + (1 - self.beta1) * grad[k]
+            self.v[k] = self.beta2 * self.v[k] + (1 - self.beta2) * (grad[k] * grad[k])
+
+            m_hat = self.m[k] / (1 - self.beta1 ** self.t)
+            v_hat = self.v[k] / (1 - self.beta2 ** self.t)
+
+            g_state[k] -= self.lr * m_hat / (torch.sqrt(v_hat) + self.eps)
+
+        # Load updated weights
+        global_model.load_state_dict(g_state)
+        return copy.deepcopy(g_state)
 
     @torch.no_grad()
     def sample_clients(self, num_clients):
         n = max(1, int(self.client_fraction * num_clients))
         return sorted(random.sample(range(num_clients), n))
 
-    @torch.no_grad()
-    def aggregate(self, global_model, local_weights):
-        """
-        local_weights: list of state_dicts from SELECTED clients (already filtered in main).
-        """
-        # FedAvg over selected clients (skip BN/personal & non-float)
-        avg = copy.deepcopy(local_weights[0])
-        def _skip(k, v):
-            return (
-                'convs_per' in k or
-                not torch.is_floating_point(v) or
-                any(s in k for s in ('running_mean','running_var','num_batches_tracked'))
-            )
-
-        for k in avg.keys():
-            # if _skip(k, avg[k]): continue
-            for w in local_weights[1:]:
-                avg[k] += w[k]
-            avg[k] /= float(len(local_weights))
-
-        # "gradient" = global - avg
-        g = {}
-        for k, v in global_model.state_dict().items():
-            # if _skip(k, v): continue
-            g[k] = v - avg[k]
-
-        # Adam moments + bias correction
-        self.t += 1
-        b1t = 1.0 - (self.beta1 ** self.t)
-        b2t = 1.0 - (self.beta2 ** self.t)
-
-        new_state = {}
-        for k, v in global_model.state_dict().items():
-            # if _skip(k, v):
-            #     new_state[k] = v
-            #     continue
-            self.m[k] = self.beta1 * self.m[k] + (1 - self.beta1) * g[k]
-            self.v[k] = self.beta2 * self.v[k] + (1 - self.beta2) * (g[k] * g[k])
-            m_hat = self.m[k] / b1t
-            v_hat = self.v[k] / b2t
-            new_state[k] = v - self.lr * m_hat / (torch.sqrt(v_hat) + self.eps)
-
-        global_model.load_state_dict(new_state)
-        return copy.deepcopy(global_model.state_dict())
 
 
 class FedAvg:
@@ -424,7 +512,7 @@ class FedProx:
 # Knowledge Graph handle
 
 def get_global_info(
-        loaderData, localModels, optimizers,
+        loaderData, localModels, 
         tau, rho_p, rho_d, num_antenna
     ):
     num_client = len(localModels)
@@ -432,8 +520,9 @@ def get_global_info(
     
     send_to_server = [[] for _ in range(num_client)] 
     for batches  in zip(*loaderData):                       # sync step across APs
-        
-        for client_idx, (model, opt, batch) in enumerate(zip(localModels, optimizers, batches)):
+        sum_large_scale_each = []
+        sum_channel_var_each = []
+        for client_idx, (model, batch) in enumerate(zip(localModels, batches)):
             # Check batch here? something wrong?
             model.eval()
             batch = batch.to(device)
@@ -446,22 +535,26 @@ def get_global_info(
                 num_APs = x_dict['AP'].shape[0] // num_graphs
                 
                 largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
-                power = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
+                power_raw = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
                     
                 largeScale = torch.expm1(largeScale)
-                phiMatrix = batch['UE'].x.reshape(num_graphs, num_UEs, -1)
+                phiMatrix = batch['UE'].x[:,:tau].reshape(num_graphs, num_UEs, -1)
                 # channelVariance = variance_calculate(largeScale, phiMatrix, tau, rho_p)
                 channelVariance = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
 
                 
-                power = power_from_raw(power, channelVariance, num_antenna)
+                power = power_from_raw(power_raw, channelVariance, num_antenna)
 
                 DS_single, PC_single, UI_single = component_calculate(power, channelVariance, largeScale, phiMatrix, rho_d=rho_d)
                 ##
             send_to_server[client_idx].append({
                 'DS': DS_single.detach(),
                 "PC": PC_single.detach(),
-                "UI": UI_single.detach()
+                "UI": UI_single.detach(),
+                'largeScaleRaw': largeScale.detach(),
+                'channelVarianceRaw': channelVariance.detach(),
+                'AP': x_dict['AP'].detach(),
+                'power_raw': power_raw.detach()
             })
             
     return send_to_server
@@ -481,6 +574,265 @@ def distribute_global_info(send_to_server):
             responses_this_ap.append(other_responses)
         response_all.append(responses_this_ap)
     return response_all
+
+@torch.no_grad()
+def kg_augment_add_AP(dataLoader, globalInformation, numGlobalAP, tau, num_antenna, rho_d):
+    num_global_AP = numGlobalAP
+    num_clients = len(globalInformation)
+    augmented_batches = [[] for _ in range(num_clients)]
+
+    for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*dataLoader), zip(*globalInformation))):    
+        all_ds = torch.cat([all_response[c]['DS'] for c in range(num_clients)], dim=1)
+        all_pc = torch.cat([all_response[c]['PC'] for c in range(num_clients)], dim=1)
+        all_ui = torch.cat([all_response[c]['UI'] for c in range(num_clients)], dim=1)
+        all_large_scale = torch.cat([all_response[c]['largeScaleRaw'] for c in range(num_clients)], dim=1)
+        all_channel_var = torch.cat([all_response[c]['channelVarianceRaw'] for c in range(num_clients)], dim=1)
+        all_AP = torch.cat([all_response[c]['AP'] for c in range(num_clients)], dim=1)
+        all_power = torch.cat([all_response[c]['power_raw'] for c in range(num_clients)], dim=1)
+
+        rate_full = rate_from_component(all_ds, all_pc, all_ui, num_antenna).detach()
+
+
+        for client_id, (response, batch) in enumerate(zip(all_response, all_loader)):
+            each_client_data = []
+            num_graphs = batch.num_graphs
+            num_UEs = batch['UE'].x.shape[0] // num_graphs
+            num_APs = batch['AP'].x.shape[0] // num_graphs
+            apFeatOrg = batch['AP'].x[:,:,None]
+            
+            # label = batch.y
+            largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
+            # largeScale = torch.expm1(largeScale)
+            channelVariance = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
+            phiMatrix = batch['UE'].x[:,:tau].reshape(num_graphs, num_UEs, -1)
+            powerClient = batch['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
+            
+            global_large_scale = new_ap_information(all_large_scale, client_id, num_global_AP)
+            global_channel_var = new_ap_information(all_channel_var, client_id, num_global_AP)
+            global_power = new_ap_information(all_power, client_id, num_global_AP)
+            global_ap = new_ap_information(all_AP[:,:,None], client_id, num_global_AP)
+            global_large_scale = torch.log1p(global_large_scale)
+            
+            
+            # ap_feat = torch.cat([apFeatOrg, new_ap], dim=1)
+            # power_matrix = torch.cat([powerClient, new_power], dim=1)
+            # large_scale_matrix = torch.cat([largeScale, new_large_scale], dim=1)
+            # large_scale_matrix = torch.log1p(large_scale_matrix)
+            # channel_variance_matrix = torch.cat([channelVariance, new_channel_var], dim=1)
+
+            
+            for each_sample in range(num_graphs):
+                global_information = (
+                    global_ap[each_sample].cpu().numpy(), 
+                    global_large_scale[each_sample].cpu().numpy(), 
+                    global_channel_var[each_sample].cpu().numpy(), 
+                    global_power[each_sample].cpu().numpy(),
+                    rate_full[each_sample,:,None].cpu().numpy(),
+                )
+                data = full_het_graph(
+                    largeScale[each_sample].cpu().numpy(), 
+                    channelVariance[each_sample].cpu().numpy(), 
+                    # label[each_sample].cpu().numpy(), 
+                    None,
+                    phiMatrix[each_sample].cpu().numpy(),
+                    # ap_feat=ap_feat[each_sample].cpu().numpy(),
+                    global_ap_information=global_information,
+                )
+                each_client_data.append(data)
+            each_client_data = Batch.from_data_list(each_client_data) 
+            augmented_batches[client_id].append(each_client_data)
+    return augmented_batches
+
+def kg_augment_add_AP_old(dataLoader, globalInformation, numGlobalAP, tau):
+    num_global_AP = numGlobalAP
+    num_clients = len(globalInformation)
+    augmented_batches = [[] for _ in range(num_clients)]
+
+    for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*dataLoader), zip(*globalInformation))):    
+        all_large_scale = torch.cat(
+            [all_response[c]['largeScaleRaw'] for c in range(num_clients)], 
+            dim=1
+        )
+        
+        all_channel_var = torch.cat(
+            [all_response[c]['channelVarianceRaw'] for c in range(num_clients)], 
+            dim=1
+        )
+        all_AP = torch.cat(
+            [all_response[c]['AP'] for c in range(num_clients)], 
+            dim=1
+        )
+        
+        all_power = torch.cat(
+            [all_response[c]['power_raw'] for c in range(num_clients)], 
+            dim=1
+        )
+        for client_id, (response, batch) in enumerate(zip(all_response, all_loader)):
+            each_client_data = []
+            num_graphs = batch.num_graphs
+            num_UEs = batch['UE'].x.shape[0] // num_graphs
+            num_APs = batch['AP'].x.shape[0] // num_graphs
+            apFeatOrg = batch['AP'].x[:,:,None]
+            
+            # label = batch.y
+            
+            largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
+            # largeScale = torch.expm1(largeScale)
+            channelVariance = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
+            phiMatrix = batch['UE'].x[:,:tau].reshape(num_graphs, num_UEs, -1)
+            # powerClient = batch['AP','down','UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
+            
+            global_large_scale = new_ap_information(all_large_scale, client_id, num_global_AP)
+            global_channel_var = new_ap_information(all_channel_var, client_id, num_global_AP)
+            global_power = new_ap_information(all_power, client_id, num_global_AP)
+            global_ap = new_ap_information(all_AP[:,:,None], client_id, num_global_AP)
+            global_large_scale = torch.log1p(global_large_scale)
+            # ap_feat = torch.cat([apFeatOrg, new_ap], dim=1)
+            # power_matrix = torch.cat([powerClient, new_power], dim=1)
+            # large_scale_matrix = torch.cat([largeScale, new_large_scale], dim=1)
+            # large_scale_matrix = torch.log1p(large_scale_matrix)
+            # channel_variance_matrix = torch.cat([channelVariance, new_channel_var], dim=1)
+
+            
+            for each_sample in range(num_graphs):
+                global_information = (
+                    global_ap[each_sample].cpu().numpy(), 
+                    global_large_scale[each_sample].cpu().numpy(), 
+                    global_channel_var[each_sample].cpu().numpy(), 
+                    global_power[each_sample].cpu().numpy()
+                )
+                data = full_het_graph(
+                    largeScale[each_sample].cpu().numpy(), 
+                    channelVariance[each_sample].cpu().numpy(), 
+                    # label[each_sample].cpu().numpy(), 
+                    None,
+                    phiMatrix[each_sample].cpu().numpy(),
+                    # ap_feat=ap_feat[each_sample].cpu().numpy(),
+                    global_ap_information=global_information,
+                )
+                each_client_data.append(data)
+            each_client_data = Batch.from_data_list(each_client_data) 
+            augmented_batches[client_id].append(each_client_data)
+    return augmented_batches
+
+def new_ap_information(aggregatedInfor, currentId, numGlobalAp, scheme='mean'):
+    aggregatedInfor = torch.cat([aggregatedInfor[:,:currentId,:], aggregatedInfor[:,currentId+1:,:]], dim=1)
+    n_others = aggregatedInfor.shape[1]
+    split_ratio = 0.6
+    if scheme == 'sum':
+        aggregatedInfor = aggregatedInfor.sum(dim=1, keepdim=True)
+        aggregatedInfor = aggregatedInfor.expand(-1, numGlobalAp, -1) 
+    elif scheme == 'mean': # better than sum
+        aggregatedInfor = aggregatedInfor.mean(dim=1, keepdim=True)
+        aggregatedInfor = aggregatedInfor.expand(-1, numGlobalAp, -1) 
+    elif scheme == 'top': # not good
+        aggregatedInfor, _ = torch.topk(aggregatedInfor, k=numGlobalAp, dim=1)
+        aggregatedInfor = aggregatedInfor.expand(-1, numGlobalAp, -1) 
+    elif scheme == 'strong-weak':
+        aggregatedInfor, idx = torch.sort(aggregatedInfor, dim=1, descending=True)
+        n_strong = max(1, int(n_others * split_ratio))
+        strong = aggregatedInfor[:, :n_strong, :]          
+        weak   = aggregatedInfor[:, n_strong:, :] 
+        strong_mean = strong.mean(dim=1, keepdim=True)   
+        weak_mean = weak.mean(dim=1, keepdim=True)   
+        if numGlobalAp == 1:
+            aggregatedInfor = strong_mean
+        elif numGlobalAp == 2:
+            aggregatedInfor = torch.cat([strong_mean, weak_mean], dim=1)
+        else:
+            n_sel = numGlobalAp//2
+            n_sel_weak = numGlobalAp - n_sel
+            strong_sel = strong[:, :n_sel, :]          
+            weak_sel   = weak[:, :n_sel_weak, :] 
+            aggregatedInfor = torch.cat([strong_sel, weak_sel], dim=1)
+            
+    elif scheme == 'all':
+        assert n_others == numGlobalAp
+        pass
+    else:
+        raise ValueError(f'{scheme} not supported!')
+    return aggregatedInfor
+
+# # Global AP nodes
+# x_ap_global = torch.ones((num_global_AP * num_graphs,1), dtype=torch.float32).to(device)
+# x_ap_org = batch['AP'].x
+# num_old_AP = x_ap_org.shape[0]
+# batch['AP'].x = torch.cat(
+#     [x_ap_org, x_ap_global],
+#     dim=0
+# ).contiguous()
+
+# s = torch.arange(num_graphs).view(num_graphs, 1, 1).to(device)
+# a = torch.arange(num_global_AP).view(1, num_global_AP, 1).to(device)
+# u = torch.arange(num_UEs).view(1, 1, num_UEs).to(device)
+
+# src = num_old_AP + num_graphs * a + s
+# dst = num_UEs * s + u
+
+# src = src.expand(-1, -1, num_UEs) 
+# dst = dst.expand(-1, num_global_AP, -1) 
+# edge_index = torch.stack([src, dst], dim=3)
+
+
+# ## Edge from Global APs to UE
+# edge_index_down_org = batch['AP', 'down', 'UE'].edge_index # [2, 192]
+# edge_attr_down_org = batch['AP', 'down', 'UE'].edge_attr # [192, 2]
+# down_large_scale = new_large_scale.reshape(-1, 1)
+# down_channel_var = new_channel_var.reshape(-1, 1)
+# down_attr = torch.cat([down_large_scale, down_channel_var], dim=1)
+# new_edge_index_down = edge_index.reshape(-1, 2).t()
+
+# batch['AP', 'down', 'UE'].edge_index = torch.cat([edge_index_down_org, new_edge_index_down], dim=1).contiguous()
+# batch['AP', 'down', 'UE'].edge_attr = torch.cat([edge_attr_down_org, down_attr], dim=0).contiguous()
+
+# ## Edge from UE to global APs
+# edge_index_up_org = batch['UE', 'up', 'AP'].edge_index # [2, 192]
+# edge_attr_up_org = batch['UE', 'up', 'AP'].edge_attr # [192, 2]
+# up_large_scale = new_large_scale.permute(0, 2, 1).reshape(-1, 1)
+# up_channel_var = new_channel_var.permute(0, 2, 1).reshape(-1, 1)
+# up_attr = torch.cat([up_large_scale, up_channel_var], dim=1)
+# new_edge_index_up = edge_index.permute(0, 2, 1, 3).reshape(-1, 2).t()
+
+# batch['UE', 'up', 'AP'].edge_index = torch.cat([edge_index_up_org, new_edge_index_up], dim=1).contiguous()
+# batch['UE', 'up', 'AP'].edge_attr = torch.cat([edge_attr_up_org, up_attr], dim=0).contiguous()
+# augmented_batches[client_id].append(batch)
+
+def kg_augmentation(train_loader, send_to_server, tau):
+    # num_clients = len(send_to_server)
+    
+    # augmented_batches = [[] for _ in range(num_clients)]
+            
+    # for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*train_loader), zip(*send_to_server))):
+    #     ds_sum = torch.stack([all_response[c]['DS'] for c in range(num_clients)], dim=0).sum(dim=0)
+    #     pc_sum = torch.stack([all_response[c]['PC'] for c in range(num_clients)], dim=0).sum(dim=0)
+    #     ui_sum = torch.stack([all_response[c]['UI'] for c in range(num_clients)], dim=0).sum(dim=0)
+        
+        
+    #     for client_id, (response, batch) in enumerate(zip(all_response, all_loader)):
+    #         ds_residual = ds_sum - response['DS']
+    #         pc_residual = pc_sum - response['PC']
+    #         ui_residual = ui_sum - response['UI']
+            
+    #         pc_residual = pc_residual.sum(dim=2)
+    #         ui_residual = ui_residual.sum(dim=2)
+            
+            
+    #         ds_new = torch.log1p(ds_residual.reshape(-1, 1))
+    #         pc_new = torch.log1p(pc_residual.reshape(-1, 1))
+    #         ui_new = torch.log1p(ui_residual.reshape(-1, 1))
+            
+    #         # pc_new = pc_residual[:, 0, :, :].permute(0,2,1).reshape(-1, 6)
+    #         # ui_new = ui_residual[:, 0, :, :].permute(0,2,1).reshape(-1, 6)
+            
+    #         batch['UE'].x =  torch.cat(
+    #             [batch['UE'].x[:,:tau], ds_new, pc_new, ui_new],
+    #             dim=1
+    #         )
+    #         batch['UE'].x = batch['UE'].x.contiguous()
+    #         augmented_batches[client_id].append(batch)
+            
+    # return augmented_batches  
+    return train_loader
 
 
 @torch.no_grad()
