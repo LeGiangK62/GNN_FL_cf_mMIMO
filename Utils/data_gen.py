@@ -79,7 +79,7 @@ def get_cg(n):
                 adj.append([i,j])
     return adj
 
-def create_graph(Beta_all, Gamma_all, Label_all, Phi_all, type='het', isDecentralized=True):
+def create_graph(Beta_all, Gamma_all, Phi_all, type='het', isDecentralized=True):
     num_sample, num_AP, num_UE = Beta_all.shape
     data_list = []
     if isDecentralized:
@@ -90,7 +90,8 @@ def create_graph(Beta_all, Gamma_all, Label_all, Phi_all, type='het', isDecentra
                     data = full_het_graph(
                         Beta_all[each_sample, each_AP][np.newaxis, :], 
                         Gamma_all[each_sample, each_AP][np.newaxis, :], 
-                        Label_all[each_sample, each_AP][np.newaxis, :], 
+                        # Label_all[each_sample, each_AP][np.newaxis, :], 
+                        None,
                         Phi_all[each_sample], 
                         each_AP, each_sample
                      )
@@ -106,7 +107,8 @@ def create_graph(Beta_all, Gamma_all, Label_all, Phi_all, type='het', isDecentra
             data = full_het_graph(
                 Beta_all[each_sample], 
                 Gamma_all[each_sample], 
-                Label_all[each_sample], 
+                # Label_all[each_sample], 
+                None,
                 Phi_all[each_sample]
             )
             data_list.append(data)
@@ -168,7 +170,7 @@ def full_het_graph(beta_single_sample, gamma_single_sample, label_single_all, ph
     rate = None   
     # Global AP
     if global_ap_information is not None:
-        global_ap, global_beta, global_gamma, global_power, rate = global_ap_information
+        global_ap, global_beta, global_gamma, global_power, global_ds, global_pc, global_ui, rate = global_ap_information
         global_ap = torch.tensor(global_ap, dtype=torch.float32).to(device)
         num_GAP, _ = global_beta.shape
         
@@ -190,14 +192,40 @@ def full_het_graph(beta_single_sample, gamma_single_sample, label_single_all, ph
         beta_up = global_beta.reshape(-1, 1)
         gamma_up = global_gamma.reshape(-1, 1)
         power_up = global_power.reshape(-1, 1)
-        edge_attr_gap_to_ue = np.concatenate((beta_up, gamma_up, power_up), axis=1)
+        global_ds_up = global_ds.reshape(-1, 1)
+        global_pc_up = global_pc.reshape(-1, 1)
+        global_ui_up = global_ui.reshape(-1, 1)
+        edge_attr_gap_to_ue = np.concatenate(
+            (
+                beta_up, 
+                gamma_up, 
+                # power_up, 
+                global_ds_up, 
+                global_pc_up, 
+                global_ui_up
+            ), 
+            axis=1
+        )
         edge_attr_gap_to_ue = torch.tensor(edge_attr_gap_to_ue, dtype=torch.float32).to(device)
         
         
         beta_down = global_beta.T.reshape(-1, 1)
         gamma_down = global_gamma.T.reshape(-1, 1)
         power_down = global_power.T.reshape(-1, 1)
-        edge_attr_ue_up_gap = np.concatenate((beta_down, gamma_down, power_down), axis=1)
+        global_ds_down = global_ds.T.reshape(-1, 1)
+        global_pc_down = global_pc.T.reshape(-1, 1)
+        global_ui_down = global_ui.T.reshape(-1, 1)
+        edge_attr_ue_up_gap = np.concatenate(
+            (
+                beta_down, 
+                gamma_down, 
+                # power_down, 
+                global_ds_down, 
+                global_pc_down, 
+                global_ui_down
+            ), 
+            axis=1
+        )
         edge_attr_ue_up_gap = torch.tensor(edge_attr_ue_up_gap, dtype=torch.float32).to(device)   
     # else:
     #     global_ap = torch.zeros(0,1, dtype=torch.float32).to(device)
@@ -246,16 +274,16 @@ def build_loader(per_ap_datasets, batch_size, seed, drop_last=True, num_workers=
     return loaders
 
 
-def build_cen_loader(betaMatrix, gammaMatrix, etaMatrix, phiMatrix, batchSize, isShuffle=False):
+def build_cen_loader(betaMatrix, gammaMatrix, phiMatrix, batchSize, isShuffle=False):
     log_large_scale = np.log1p(betaMatrix)
-    deta_cen = create_graph(log_large_scale, gammaMatrix, etaMatrix, phiMatrix, 'het', isDecentralized=False)
+    deta_cen = create_graph(log_large_scale, gammaMatrix, phiMatrix, 'het', isDecentralized=False)
     loader_cen = DataLoader(deta_cen, batch_size=batchSize, shuffle=isShuffle)
     return deta_cen, loader_cen
 
 
-def build_decen_loader(betaMatrix, gammaMatrix, etaMatrix, phiMatrix, batchSize, seed=1712):
+def build_decen_loader(betaMatrix, gammaMatrix, phiMatrix, batchSize, seed=1712):
     log_large_scale = np.log1p(betaMatrix)
-    data_decen = create_graph(log_large_scale, gammaMatrix, etaMatrix, phiMatrix, 'het')
+    data_decen = create_graph(log_large_scale, gammaMatrix, phiMatrix, 'het')
     loader_decen = build_loader(data_decen, batchSize, seed=seed, drop_last=False)
     return data_decen, loader_decen
     

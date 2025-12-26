@@ -85,8 +85,12 @@ def power_from_raw(rawMatrix, channelVarMatrix, num_antenna=1):
 # Only FL functions
 
 def rate_from_component(desiredSignal, pilotContamination, userInterference, numAntenna, rho_d=0.1):
+    # desiredSignal: num_graphs, num_AP, num_UE
+    # pilotContamination: num_graphs, num_AP, num_UE_prime, num_UE
+    # userInterference: num_graphs, num_AP, num_UE_prime, num_UE
+    
     num_graphs, num_APs, num_UEs = desiredSignal.shape
-    devcie = desiredSignal.device
+    device = desiredSignal.device
     dtype = desiredSignal.dtype
     
     sum_DS = desiredSignal.sum(dim=1)  
@@ -97,10 +101,37 @@ def rate_from_component(desiredSignal, pilotContamination, userInterference, num
 
     
     sum_PC = sum_PC ** 2
-    term1 = sum_PC * (1 - torch.eye(num_UEs, device=devcie, dtype=dtype))
+    term1 = sum_PC * (1 - torch.eye(num_UEs, device=device, dtype=dtype))
     term1 = (numAntenna**2) * term1.sum(dim=1)
     # term1 = (numAntenna**2) * ((sum_PC * (1 - torch.eye(num_UEs, device=devcie))).pow(2).sum(dim=1)) 
     term2 = numAntenna * sum_UI.sum(dim=1)          
+    
+    denom = term1 + term2 + 1
+
+    rate_all = torch.log2(1 + num/denom)  
+
+    return rate_all
+
+def rate_from_component_reduced(desiredSignal, squarePilotContamination, userInterference, numAntenna, rho_d=0.1):
+    # desiredSignal: num_graphs, num_AP, num_UE
+    # pilotContamination: num_graphs, num_AP, num_UE
+    # userInterference: num_graphs, num_AP, num_UE
+    num_graphs, num_APs, num_UEs = desiredSignal.shape
+    device = desiredSignal.device
+    dtype = desiredSignal.dtype
+    
+    sum_DS = desiredSignal.sum(dim=1)  
+    num = (numAntenna**2) * (sum_DS ** 2) 
+
+    # Only sum over APs (dim=1), since already summed over num_UE_prime
+    sum_UI = userInterference.sum(dim=1)    # shape: (num_graphs, num_UE)
+    
+    term1 = (numAntenna**2) * squarePilotContamination  # This is the second sum that was there before
+    
+    term2 = numAntenna * sum_UI  # This is the second sum that was there before
+    
+    print(term1.shape)
+    print(term2.shape)
     denom = term1 + term2 + 1
 
     rate_all = torch.log2(1 + num/denom)  

@@ -35,7 +35,7 @@ class APConvLayer(MessagePassing):
             drop_p=0,
             **kwargs
     ):
-        super().__init__(aggr='mean', **kwargs)
+        super().__init__(aggr='add', **kwargs)
         self.metadata = metadata
         self.src_init_dict = init_channel
         self.edge_init = init_channel['edge']
@@ -157,7 +157,7 @@ class APHetNet(nn.Module):
         self.ap_dim = src_dim_dict['AP']
         self.edge_dim = src_dim_dict['edge']
         
-        self.gap_dim = src_dim_dict['GAP']
+        self.gap_dim = out_channels # src_dim_dict['GAP']
         self.gap_edge_dim = src_dim_dict['GAP_edge']
         ## The dummy 
         # src_dim_dict['edge'] = dim_dict['edge'] - 1 # dummy power
@@ -214,6 +214,14 @@ class APHetNet(nn.Module):
                 # drop_p=0.2
             )
             self.convs.append(conv)
+            if isDecentralized:
+                conv = APConvLayer(
+                    {'GAP': out_channels, 'UE': out_channels}, 
+                    out_channels, out_channels, src_dim_dict, 
+                    [('UE', 'g_up', 'GAP'), ('GAP', 'g_down', 'UE')],
+                    # drop_p=0.2
+                )
+                self.convs.append(conv)
 
 
         hid = hid_layers # too much is not good - 8 is bad, 4 is currently good
