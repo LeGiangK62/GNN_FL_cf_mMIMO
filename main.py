@@ -161,7 +161,9 @@ if __name__ == '__main__':
         'AP': ap_dim,
         'edge': edge_dim,
         'GAP': 0,
-        'GAP_edge': edge_dim + 1
+        'GAP_edge': edge_dim + 1,
+        'UE_inteference_edge': 2
+        
     }
     
     
@@ -304,7 +306,8 @@ if __name__ == '__main__':
         'AP': ap_dim,
         'edge': edge_dim,
         'GAP': 0,
-        'GAP_edge': edge_dim + 3
+        'GAP_edge': edge_dim + 3,
+        'UE_inteference_edge': 2
     }
     
     # Initialize the models, optimizers, and schedulers for clients

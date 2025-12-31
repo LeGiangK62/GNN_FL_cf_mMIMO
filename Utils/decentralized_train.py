@@ -787,29 +787,28 @@ def kg_augment_add_AP(
             # large_scale_matrix = torch.log1p(large_scale_matrix)
             # channel_variance_matrix = torch.cat([channelVariance, new_channel_var], dim=1)
 
-            # print(global_ap.shape)
-            # prin
             for each_sample in range(num_graphs):
                 global_information = (
-                    global_ap[each_sample].cpu().numpy(), 
-                    global_large_scale[each_sample].cpu().numpy(), 
-                    # S[each_sample].cpu().numpy(), 
-                    global_channel_var[each_sample].cpu().numpy(), 
+                    global_ap[each_sample].cpu().numpy(),
+                    global_large_scale[each_sample].cpu().numpy(),
+                    global_channel_var[each_sample].cpu().numpy(),
                     global_power[each_sample].cpu().numpy(),
                     global_ds[each_sample].cpu().numpy(),
                     global_pc[each_sample].cpu().numpy(),
                     global_ui[each_sample].cpu().numpy(),
                     rate_gap[each_sample,:,None].cpu().numpy(),
-                    # None,
+                )
+                tmp_ue_ue_information = (
+                    global_pc_raw[each_sample].cpu().numpy(),
+                    global_ui_raw[each_sample].cpu().numpy(),
                 )
                 data = full_het_graph(
-                    largeScale[each_sample].cpu().numpy(), 
-                    channelVariance[each_sample].cpu().numpy(), 
-                    # label[each_sample].cpu().numpy(), 
+                    largeScale[each_sample].cpu().numpy(),
+                    channelVariance[each_sample].cpu().numpy(),
                     None,
                     phiMatrix[each_sample].cpu().numpy(),
-                    # ap_feat=ap_feat[each_sample].cpu().numpy(),
                     global_ap_information=global_information,
+                    tmp_ue_ue_information=tmp_ue_ue_information
                 )
                 each_client_data.append(data)
             each_client_data = Batch.from_data_list(each_client_data) 

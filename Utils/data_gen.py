@@ -115,7 +115,14 @@ def create_graph(Beta_all, Gamma_all, Phi_all, type='het', isDecentralized=True)
     return data_list 
 
 
-def full_het_graph(beta_single_sample, gamma_single_sample, label_single_all, phi_single_sample, ap_id=None, sample_id=None, global_ap_information=None):
+def full_het_graph(
+        beta_single_sample, gamma_single_sample, 
+        label_single_all, phi_single_sample, 
+        ap_id=None, sample_id=None, 
+        global_ap_information=None,
+        tmp_ue_ue_information=None
+        
+    ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     num_AP, num_UE = beta_single_sample.shape
@@ -240,6 +247,39 @@ def full_het_graph(beta_single_sample, gamma_single_sample, label_single_all, ph
         data['GAP', 'g_down', 'UE'].edge_attr = edge_attr_gap_to_ue
         data['UE', 'g_up', 'GAP'].edge_index = edge_index_ue_up_gap
         data['UE', 'g_up', 'GAP'].edge_attr = edge_attr_ue_up_gap
+        
+        
+    ## UE-UE edge
+    if tmp_ue_ue_information is not None:
+        global_pc_raw, global_ui_raw = tmp_ue_ue_information
+        
+        pc_matrix = global_pc_raw.sum(axis=0)  # [num_UE, num_UE]
+        ui_matrix = global_ui_raw.sum(axis=0)  # [num_UE, num_UE]
+        src, dst = np.meshgrid(np.arange(num_UE), np.arange(num_UE), indexing='ij')
+        mask = src != dst  # Exclude self-loops
+        ue_ue_edge_index = np.stack([src[mask], dst[mask]], axis=0)  # [2, num_edges]
+        ue_ue_edge_attr = np.stack([
+            pc_matrix[mask],  # PC values
+            ui_matrix[mask]   # UI values
+        ], axis=1)  # [num_edges, 2]
+    
+        # old
+        # ue_ue_edge_index = []
+        # ue_ue_edge_attr = []
+        
+        # for n in range(num_UE):
+        #     for n_prime in range(num_UE):
+        #         if n != n_prime: continue
+        #         pc_from_prime = global_pc_raw[:, n_prime, n].sum().item()
+        #         ui_from_prime = global_ui_raw[:, n_prime, n].sum().item() 
+
+        #         ue_ue_edge_index.append([n_prime, n])
+        #         ue_ue_edge_attr.append([pc_from_prime, ui_from_prime])
+        
+        ue_ue_edge_index = torch.tensor(ue_ue_edge_index, dtype=torch.long).contiguous()
+        ue_ue_edge_attr = torch.tensor(ue_ue_edge_attr, dtype=torch.float32)
+        data['UE', 'interfere', 'UE'].edge_index = ue_ue_edge_index.to(device)
+        data['UE', 'interfere', 'UE'].edge_attr = ue_ue_edge_attr.to(device)
         
         
     if label_single_all is not None:

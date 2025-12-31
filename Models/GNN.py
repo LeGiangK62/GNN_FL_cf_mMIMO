@@ -45,13 +45,14 @@ class APConvLayer(MessagePassing):
 
         self.msg = nn.ModuleDict() 
         self.upd = nn.ModuleDict() 
+        self.edge_upd = nn.ModuleDict() 
         
         self.gamma = nn.ParameterDict()
         self.gamma_edge = nn.ParameterDict()
         
         hidden = out_channel//2
         for edge_type in metadata:
-            src_type, _, dst_type = edge_type
+            src_type, short_edge_type, dst_type = edge_type
             src_dim = src_dim_dict[src_type]
             dst_dim = src_dim_dict[dst_type]
             src_init = init_channel[src_type]
@@ -67,10 +68,10 @@ class APConvLayer(MessagePassing):
             
             # self.gamma[dst_type] = nn.Parameter(torch.full((out_channel - dst_init,), 1e-3))
             
-        self.edge_upd= MLP(
-            [sum(src_dim_dict.values()) + edge_dim, out_channel - self.edge_init], 
-            batch_norm=False, dropout_prob=0.1
-        )
+            self.edge_upd[short_edge_type] = MLP(
+                [sum(src_dim_dict.values()) + edge_dim, out_channel - self.edge_init], 
+                batch_norm=False, dropout_prob=0.1
+            )
         # self.gamma_edge = nn.Parameter(torch.full((out_channel - self.edge_init,), 1e-3))
 
     def reset_parameters(self):
@@ -96,7 +97,6 @@ class APConvLayer(MessagePassing):
             
             edge_attr = edge_attr_dict[edge_type]
             
-            
             # if self.training and self.drop_prob > 0:
             #     # DropEdge
             #     edge_index, edge_mask  = dropout_edge(
@@ -113,6 +113,16 @@ class APConvLayer(MessagePassing):
             #     )
 
             # Node update
+            
+            # if edge_type == ('UE', 'interfere', 'UE'):
+            #     print(src_type)
+            #     print(dst_type)
+            #     print(x_src.shape)
+            #     print(x_dst.shape)
+            #     print(edge_attr.shape)
+            #     print(edge_index)
+            #     print(edge_index.shape) # Must be the problem
+                
             msg = self.propagate(edge_index, x=(x_src, x_dst), edge_attr=edge_attr, edge_type=edge_type)
             tmp = torch.cat([x_dst, msg], dim=1)
             tmp = self.upd[dst_type](tmp)
@@ -124,7 +134,13 @@ class APConvLayer(MessagePassing):
             
             
             # Edge update
-            edge_attr_dict[edge_type] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
+            # try:
+            edge_attr_dict[edge_type] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr, edge_type=edge_type)
+            # except RuntimeError as e:
+            #     print(e)
+            #     print(edge_type)
+            #     print(x_src.shape)
+            #     print(x_dst.shape)
             # if self.training and self.drop_prob > 0:
             #     edge_attr_dict[edge_type][edge_mask,:] = self.edge_updater(edge_index, x=(x_src, x_dst), edge_attr=edge_attr)
             # else:
@@ -139,9 +155,19 @@ class APConvLayer(MessagePassing):
         out = self.msg[src_type](out)
         return out
 
-    def edge_update(self, x_j, x_i, edge_attr):
+    def edge_update(self, x_j, x_i, edge_attr, edge_type):
+        _, short_edge_type, _ = edge_type
         tmp = torch.cat([x_j, edge_attr, x_i], dim=1)
-        out = self.edge_upd(tmp)
+        try:
+            out = self.edge_upd[short_edge_type](tmp)
+        except:
+            print(edge_type)
+            print(x_j.shape)
+            print(x_i.shape)
+            print(edge_attr.shape)
+            print(self.src_dim_dict)
+            prin
+        
         if self.out_channel == self.edge_init:
             out = out + edge_attr # * self.gamma_edge
         out = torch.cat([edge_attr[:,:self.edge_init], out], dim=1)
@@ -157,8 +183,6 @@ class APHetNet(nn.Module):
         self.ap_dim = src_dim_dict['AP']
         self.edge_dim = src_dim_dict['edge']
         
-        self.gap_dim = out_channels # src_dim_dict['GAP']
-        self.gap_edge_dim = src_dim_dict['GAP_edge']
         ## The dummy 
         # src_dim_dict['edge'] = dim_dict['edge'] - 1 # dummy power
 
@@ -186,11 +210,19 @@ class APHetNet(nn.Module):
         
         # Layers for Global AP
         if isDecentralized:
+            src_dim_dict_gap = dim_dict.copy()
+            src_dim_dict_gap['edge'] = dim_dict['GAP_edge']
+            
+            src_dim_dict_ue = dim_dict.copy()
+            src_dim_dict_ue['edge'] = dim_dict['UE_inteference_edge']
+            self.gap_dim = out_channels # src_dim_dict['GAP']
+            self.gap_edge_dim = src_dim_dict['GAP_edge']
+            self.ue_inteference_edge_dim = src_dim_dict['UE_inteference_edge']
             self.convs.append(
                 APConvLayer(
                     {'GAP': self.gap_dim, 'UE': out_channels},
                     self.gap_edge_dim,
-                    out_channels, src_dim_dict,
+                    out_channels, src_dim_dict_gap,
                     [('UE', 'g_up', 'GAP')],
                 )
             )
@@ -199,8 +231,17 @@ class APHetNet(nn.Module):
                 APConvLayer(
                     {'GAP': out_channels, 'UE': out_channels},
                     self.gap_edge_dim,
-                    out_channels, src_dim_dict,
+                    out_channels, src_dim_dict_gap,
                     [('GAP', 'g_down', 'UE')],
+                )
+            )
+            
+            self.convs.append(
+                APConvLayer(
+                    {'UE': out_channels, 'UE_dummy': out_channels},
+                    self.ue_inteference_edge_dim,
+                    out_channels, src_dim_dict_ue,
+                    [('UE', 'interfere', 'UE')],
                 )
             )
     
