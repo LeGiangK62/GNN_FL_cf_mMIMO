@@ -35,6 +35,11 @@ cd GNN_FL_cf_mMIMO
 pip install -r requirements.txt
 ```
 ---
+## Running command
+'''bash
+python main.py --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --cen_lr 5e-3 --num_epochs_cen 1000 --hidden_channels 64 --num_gnn_layers 3
+'''
+---
 ## Citation
 Please cite my paper (To be update...)
 

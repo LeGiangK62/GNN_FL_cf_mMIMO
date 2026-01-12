@@ -158,15 +158,15 @@ class APConvLayer(MessagePassing):
     def edge_update(self, x_j, x_i, edge_attr, edge_type):
         _, short_edge_type, _ = edge_type
         tmp = torch.cat([x_j, edge_attr, x_i], dim=1)
-        try:
-            out = self.edge_upd[short_edge_type](tmp)
-        except:
-            print(edge_type)
-            print(x_j.shape)
-            print(x_i.shape)
-            print(edge_attr.shape)
-            print(self.src_dim_dict)
-            prin
+        # try:
+        out = self.edge_upd[short_edge_type](tmp)
+        # except:
+        #     print(edge_type)
+        #     print(x_j.shape)
+        #     print(x_i.shape)
+        #     print(edge_attr.shape)
+        #     print(self.src_dim_dict)
+        #     prin
         
         if self.out_channel == self.edge_init:
             out = out + edge_attr # * self.gamma_edge
