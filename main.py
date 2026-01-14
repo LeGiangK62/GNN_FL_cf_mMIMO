@@ -13,11 +13,12 @@ import numpy as np
 import scipy.io
 from Utils.data_gen import build_cen_loader, build_decen_loader
 
-from Models.GNN import APHetNet
+from Models.GNN import APHetNet, APHetNetFL
 from Utils.args import parse_args
 from Utils.centralized_train import cen_eval, cen_train, cen_loss_function
 from Utils.decentralized_train import FedAvg
-from Utils.decentralized_train import fl_train, fl_eval_rate, get_global_info, distribute_global_info, kg_augment_add_AP
+# from Utils.decentralized_train import fl_train, fl_eval_rate, get_global_info, distribute_global_info, kg_augment_simple
+from Utils.decentralized_train import server_return, distribute_global_info, get_global_info, fl_train, fl_eval
 
 
 
@@ -159,11 +160,7 @@ if __name__ == '__main__':
     dim_dict = {
         'UE': ue_dim,
         'AP': ap_dim,
-        'edge': edge_dim,
-        'GAP': 0,
-        'GAP_edge': edge_dim + 1,
-        'UE_inteference_edge': 2
-        
+        'edge': edge_dim,        
     }
     
     
@@ -267,69 +264,81 @@ if __name__ == '__main__':
             eval_mode=True
         )
 
-    # gnn_rates = gnn_rates.detach().cpu().numpy() 
-    # all_one_rates = all_one_rates.detach().cpu().numpy()
-    # opt_rates = opt_train_rates[eval_idx] 
-    # max_value = np.ceil(max(np.max(all_one_rates), np.max(gnn_rates), np.max(opt_rates))*100)/100
-    
-    # min_rate, max_rate = 0, max_value
-    # # y_axis = np.arange(0, 1.0, 1/202)
-    # y_axis = np.linspace(0, 1, num_eval+2)
-    # gnn_rates.sort();  opt_rates.sort(); all_one_rates.sort();
-    # gnn_rates = np.insert(gnn_rates, 0, min_rate); gnn_rates = np.insert(gnn_rates,num_eval+1,max_rate)
-    # all_one_rates = np.insert(all_one_rates, 0, min_rate); all_one_rates = np.insert(all_one_rates,num_eval+1,max_rate)
-    # opt_rates = np.insert(opt_rates, 0, min_rate); opt_rates = np.insert(opt_rates,num_eval+1,max_rate)
+    if args.eval_plot:
+        gnn_rates = gnn_rates.detach().cpu().numpy() 
+        all_one_rates = all_one_rates.detach().cpu().numpy()
+        opt_rates = opt_train_rates[eval_idx] 
+        max_value = np.ceil(max(np.max(all_one_rates), np.max(gnn_rates), np.max(opt_rates))*100)/100
+        
+        min_rate, max_rate = 0, max_value
+        # y_axis = np.arange(0, 1.0, 1/202)
+        y_axis = np.linspace(0, 1, num_eval+2)
+        gnn_rates.sort();  opt_rates.sort(); all_one_rates.sort();
+        gnn_rates = np.insert(gnn_rates, 0, min_rate); gnn_rates = np.insert(gnn_rates,num_eval+1,max_rate)
+        all_one_rates = np.insert(all_one_rates, 0, min_rate); all_one_rates = np.insert(all_one_rates,num_eval+1,max_rate)
+        opt_rates = np.insert(opt_rates, 0, min_rate); opt_rates = np.insert(opt_rates,num_eval+1,max_rate)
 
-    # plt.figure(figsize=(6,4), dpi=180)
-    # plt.plot(all_one_rates, y_axis, label = 'Maximum Power', linewidth=2)
-    # plt.plot(gnn_rates, y_axis, label = 'Centralized GNN', linewidth=2)
-    # plt.plot(opt_rates, y_axis, label = 'Optimal', linewidth=2)
-    # plt.xlabel('Minimum rate [bps/Hz]', {'fontsize':16})
-    # plt.ylabel('Empirical CDF', {'fontsize':16})
-    # plt.legend(fontsize = 14)
-    # plt.grid()
-    
-    # figure_name = f'{timestamp}_eval_cen'
-    # eval_path = EVAL_DIR + f'/{figure_name}.png' 
-    # plt.savefig(eval_path, dpi=300)  
-    # print(f'Save Evaluation figure to {eval_path}.')
+        plt.figure(figsize=(6,4), dpi=180)
+        plt.plot(all_one_rates, y_axis, label = 'Maximum Power', linewidth=2)
+        plt.plot(gnn_rates, y_axis, label = 'Centralized GNN', linewidth=2)
+        plt.plot(opt_rates, y_axis, label = 'Optimal', linewidth=2)
+        plt.xlabel('Minimum rate [bps/Hz]', {'fontsize':16})
+        plt.ylabel('Empirical CDF', {'fontsize':16})
+        plt.legend(fontsize = 14)
+        plt.grid()
+        
+        figure_name = f'{timestamp}_eval_cen'
+        eval_path = EVAL_DIR + f'/{figure_name}.png' 
+        plt.savefig(eval_path, dpi=300)  
+        print(f'Save Evaluation figure to {eval_path}.')
     
     # FL-GNN
-    
-    ## Model 
+
+    ## Model
     ap_dim = train_data[0][0]['AP'].x.shape[1]
-    ue_dim = train_data[0][0]['UE'].x.shape[1]
+    ue_dim_original = train_data[0][0]['UE'].x.shape[1]  # Original UE dim (tau)
     edge_dim = train_data[0][0]['down'].edge_attr.shape[1]
-    tt_meta = [('UE', 'up', 'AP'), ('AP', 'down', 'UE'), ('GAP', 'g_down', 'UE'),  ('UE', 'g_up', 'GAP')]
+
+    # FL model expects augmented UE features: [tau + 3]
+    # where +3 = DS_global + PC_global + UI_global
+    ue_dim_fl = ue_dim_original
+
+    tt_meta = [('UE', 'up', 'AP'), ('AP', 'down', 'UE')]
     dim_dict = {
-        'UE': ue_dim,
+        'UE': ue_dim_fl,  # Augmented UE dimension
         'AP': ap_dim,
         'edge': edge_dim,
-        'GAP': 0,
-        'GAP_edge': edge_dim + 3,
-        'UE_inteference_edge': 2
     }
-    
+
     # Initialize the models, optimizers, and schedulers for clients
-    global_model = APHetNet(
+    global_model = APHetNetFL(
         metadata=tt_meta,
         dim_dict=dim_dict,
         out_channels=hidden_channels,
         num_layers=num_gnn_layers,
         hid_layers=hidden_channels//2,
-        isDecentralized=True
+        isDecentralized=False  # Use same architecture as centralized
     ).to(device)
 
-    # global_model = cen_model
+    # Optional: Warm-start from centralized model (transfer learning)
+    # if cen_pretrain is not None:
+    #     # Load centralized weights but skip UE input layer due to dimension mismatch
+    #     from Utils.decentralized_train import load_state_dict_skipping
+    #     load_state_dict_skipping(
+    #         global_model,
+    #         cen_model.state_dict(),
+    #         exclude_contains=('convs.0.msg.UE',)  # Skip first UE message layer
+    #     )
+
     local_models, optimizers, schedulers = [], [], []
     for _ in range(num_clients):
-        model = APHetNet(
+        model = APHetNetFL(
             metadata=tt_meta,
             dim_dict=dim_dict,
             out_channels=hidden_channels,
             num_layers=num_gnn_layers,
             hid_layers=hidden_channels//2,
-            isDecentralized=True
+            isDecentralized=False
         ).to(device)
         model.load_state_dict(global_model.state_dict())
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
@@ -346,38 +355,30 @@ if __name__ == '__main__':
         
     fl_all_rate = []
     fl_all_rate_test = []
+
+    ### Training loop
     for round in range(num_rounds):
-        factor = lr_factor(round, warmup_rounds=20, gamma=gamma )                # in (0, 1]
-        current_lr = lr * factor
-
-
-        for opt in optimizers:
-            for pg in opt.param_groups:
-                pg['lr'] = current_lr
-
-
-        # global information
+        ## Send the information to the global server
+        ## DS, PC, UI - for rate calculation
+        ## AP, UE, others, to augmented graph
         send_to_server = get_global_info(
             train_loader, local_models,
             tau=tau, rho_p=rho_p, rho_d=rho_d,
             num_antenna=num_antenna
         )
-
-        # KG data with global AP nodes
-        kg_train_loader = kg_augment_add_AP(
-            train_loader, send_to_server, num_global_ap, tau, num_antenna, rho_d
-        )
         
-        response_all = distribute_global_info(send_to_server)
-
-        # Train local models
+        ## Extract the information from server to update the client_train_loader
+        response_from_server = server_return(train_loader, send_to_server)        
+        ## Train local models
         local_weights = []
         local_gradients = []
         total_loss = 0.0
         total_rate = 0.0
         selected_clients = fed.sample_clients(num_clients)
 
-        for client_idx, (model, opt, batches, response_ap) in enumerate(zip(local_models, optimizers, kg_train_loader, response_all)):
+        for client_idx, (model, opt, client_data_tuple) in enumerate(zip(local_models, optimizers, zip(*response_from_server))):
+            batches = [item['loader'] for item in client_data_tuple]
+            batch_rate = [item['rate_pack'] for item in client_data_tuple]
             if client_idx not in selected_clients:
                 local_weights.append(copy.deepcopy(model.state_dict()))
                 local_gradients.append(None)
@@ -385,11 +386,11 @@ if __name__ == '__main__':
             for epoch in range(num_epochs):
                 train_loss, train_min, local_gradient = fl_train(
                     batches, 
-                    response_ap,
+                    batch_rate,
                     model, opt,
                     tau=tau, rho_p=rho_p, rho_d=rho_d,
                     num_antenna=num_antenna,
-                    epochRatio=round/(2*num_rounds/3),
+                    # epochRatio=round/(2*4/3),
                 )
             local_weights.append(copy.deepcopy(model.state_dict()))
             local_gradients.append(local_gradient)
@@ -398,37 +399,16 @@ if __name__ == '__main__':
 
         avg_loss = total_loss / len(selected_clients)
         avg_rate = total_rate / len(selected_clients)
-
-        # Evaluate on training data
-        send_to_server = get_global_info(
+        
+        ## Evaluate on the client local data (both train and test)
+        total_train_rate = fl_eval(
             train_loader, local_models,
-            tau=tau, rho_p=rho_p, rho_d=rho_d,
-            num_antenna=num_antenna
-        )
-        kg_traineval_loader = kg_augment_add_AP(
-            train_loader, send_to_server, num_global_ap, tau, num_antenna, rho_d
-        )
-
-        total_train_rate = fl_eval_rate(
-            kg_traineval_loader, local_models,
-            tau=tau, rho_p=rho_p, rho_d=rho_d,
-            num_antenna=num_antenna,
+            tau, rho_p, rho_d, num_antenna
         ).cpu().detach()
 
-        # Evaluate on test data
-        send_to_server = get_global_info(
+        total_eval_rate = fl_eval(
             test_loader, local_models,
-            tau=tau, rho_p=rho_p, rho_d=rho_d,
-            num_antenna=num_antenna
-        )
-        kg_test_loader = kg_augment_add_AP(
-            test_loader, send_to_server, num_global_ap, tau, num_antenna, rho_d
-        )
-
-        total_eval_rate = fl_eval_rate(
-            kg_test_loader, local_models,
-            tau=tau, rho_p=rho_p, rho_d=rho_d,
-            num_antenna=num_antenna,
+            tau, rho_p, rho_d, num_antenna
         ).cpu().detach()
 
         # Global update: Avg
@@ -447,8 +427,9 @@ if __name__ == '__main__':
                 f"Avg Train Rate = {total_train_rate:.4f} | "
                 f"Avg Eval Rate = {total_eval_rate:.4f} | "
             )
+    
     end_time = time.time()
     execution_time = end_time - start_time
     print(f"Execution Time: {timedelta(seconds=execution_time)}")
-    ## Result of FL-GNN
+    # Result of FL-GNN
     

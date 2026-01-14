@@ -169,130 +169,131 @@ def full_het_graph(
     # Create the heterogeneous graph data
     data = HeteroData()
     data['AP'].x = x_ap
+    data['UE'].x = x_ue
     data['AP', 'down', 'UE'].edge_index = edge_index_ap_down_ue
     data['AP', 'down', 'UE'].edge_attr = edge_attr_ap_to_ue
     data['UE', 'up', 'AP'].edge_index = edge_index_ue_up_ap
     data['UE', 'up', 'AP'].edge_attr = edge_attr_ue_up_ap
     
-    rate = None   
-    # Global AP
-    if global_ap_information is not None:
-        global_ap, global_beta, global_gamma, global_power, global_ds, global_pc, global_ui, rate = global_ap_information
-        global_ap = torch.tensor(global_ap, dtype=torch.float32).to(device)
-        num_GAP, _ = global_beta.shape
+    # rate = None   
+    # # Global AP
+    # if global_ap_information is not None:
+    #     global_ap, global_beta, global_gamma, global_power, global_ds, global_pc, global_ui, rate = global_ap_information
+    #     global_ap = torch.tensor(global_ap, dtype=torch.float32).to(device)
+    #     num_GAP, _ = global_beta.shape
         
-        #Global AP
+    #     #Global AP
         
-        edge_index_gap_down_ue = []
-        edge_index_ue_up_gap = []
+    #     edge_index_gap_down_ue = []
+    #     edge_index_ue_up_gap = []
 
-        for ap_idx in range(num_GAP):
-            for ue_idx in range(num_UE):
-                edge_index_gap_down_ue.append([ap_idx, ue_idx])  
+    #     for ap_idx in range(num_GAP):
+    #         for ue_idx in range(num_UE):
+    #             edge_index_gap_down_ue.append([ap_idx, ue_idx])  
         
-        for ue_idx in range(num_UE):
-            for ap_idx in range(num_GAP):
-                edge_index_ue_up_gap.append([ue_idx, ap_idx])  
-        edge_index_gap_down_ue = torch.tensor(edge_index_gap_down_ue, dtype=torch.long).t().contiguous().to(device)
-        edge_index_ue_up_gap = torch.tensor(edge_index_ue_up_gap, dtype=torch.long).t().contiguous().to(device)
+    #     for ue_idx in range(num_UE):
+    #         for ap_idx in range(num_GAP):
+    #             edge_index_ue_up_gap.append([ue_idx, ap_idx])  
+    #     edge_index_gap_down_ue = torch.tensor(edge_index_gap_down_ue, dtype=torch.long).t().contiguous().to(device)
+    #     edge_index_ue_up_gap = torch.tensor(edge_index_ue_up_gap, dtype=torch.long).t().contiguous().to(device)
 
-        beta_up = global_beta.reshape(-1, 1)
-        gamma_up = global_gamma.reshape(-1, 1)
-        power_up = global_power.reshape(-1, 1)
-        global_ds_up = global_ds.reshape(-1, 1)
-        global_pc_up = global_pc.reshape(-1, 1)
-        global_ui_up = global_ui.reshape(-1, 1)
-        edge_attr_gap_to_ue = np.concatenate(
-            (
-                beta_up, 
-                gamma_up, 
-                # power_up, 
-                global_ds_up, 
-                global_pc_up, 
-                global_ui_up
-            ), 
-            axis=1
-        )
-        edge_attr_gap_to_ue = torch.tensor(edge_attr_gap_to_ue, dtype=torch.float32).to(device)
+    #     beta_up = global_beta.reshape(-1, 1)
+    #     gamma_up = global_gamma.reshape(-1, 1)
+    #     power_up = global_power.reshape(-1, 1)
+    #     global_ds_up = global_ds.reshape(-1, 1)
+    #     global_pc_up = global_pc.reshape(-1, 1)
+    #     global_ui_up = global_ui.reshape(-1, 1)
+    #     edge_attr_gap_to_ue = np.concatenate(
+    #         (
+    #             beta_up, 
+    #             gamma_up, 
+    #             # power_up, 
+    #             global_ds_up, 
+    #             global_pc_up, 
+    #             global_ui_up
+    #         ), 
+    #         axis=1
+    #     )
+    #     edge_attr_gap_to_ue = torch.tensor(edge_attr_gap_to_ue, dtype=torch.float32).to(device)
         
         
-        beta_down = global_beta.T.reshape(-1, 1)
-        gamma_down = global_gamma.T.reshape(-1, 1)
-        power_down = global_power.T.reshape(-1, 1)
-        global_ds_down = global_ds.T.reshape(-1, 1)
-        global_pc_down = global_pc.T.reshape(-1, 1)
-        global_ui_down = global_ui.T.reshape(-1, 1)
-        edge_attr_ue_up_gap = np.concatenate(
-            (
-                beta_down, 
-                gamma_down, 
-                # power_down, 
-                global_ds_down, 
-                global_pc_down, 
-                global_ui_down
-            ), 
-            axis=1
-        )
-        edge_attr_ue_up_gap = torch.tensor(edge_attr_ue_up_gap, dtype=torch.float32).to(device)   
+    #     beta_down = global_beta.T.reshape(-1, 1)
+    #     gamma_down = global_gamma.T.reshape(-1, 1)
+    #     power_down = global_power.T.reshape(-1, 1)
+    #     global_ds_down = global_ds.T.reshape(-1, 1)
+    #     global_pc_down = global_pc.T.reshape(-1, 1)
+    #     global_ui_down = global_ui.T.reshape(-1, 1)
+    #     edge_attr_ue_up_gap = np.concatenate(
+    #         (
+    #             beta_down, 
+    #             gamma_down, 
+    #             # power_down, 
+    #             global_ds_down, 
+    #             global_pc_down, 
+    #             global_ui_down
+    #         ), 
+    #         axis=1
+    #     )
+    #     edge_attr_ue_up_gap = torch.tensor(edge_attr_ue_up_gap, dtype=torch.float32).to(device)   
+    # # else:
+    # #     global_ap = torch.zeros(0,1, dtype=torch.float32).to(device)
+    # #     edge_index_gap_down_ue = torch.zeros(2,0, dtype=torch.long).contiguous().to(device)
+    # #     edge_attr_gap_to_ue = torch.zeros(0,2, dtype=torch.float32).contiguous().to(device)
+    # #     edge_index_ue_up_gap = torch.zeros(2,0, dtype=torch.long).contiguous().to(device)
+    # #     edge_attr_ue_up_gap = torch.zeros(0,2, dtype=torch.float32).contiguous().to(device)
+        
+    #     data['GAP'].x = global_ap
+        
+    #     data['GAP', 'g_down', 'UE'].edge_index = edge_index_gap_down_ue
+    #     data['GAP', 'g_down', 'UE'].edge_attr = edge_attr_gap_to_ue
+    #     data['UE', 'g_up', 'GAP'].edge_index = edge_index_ue_up_gap
+    #     data['UE', 'g_up', 'GAP'].edge_attr = edge_attr_ue_up_gap
+        
+        
+    # ## UE-UE edge
+    # if tmp_ue_ue_information is not None:
+    #     global_pc_raw, global_ui_raw = tmp_ue_ue_information
+        
+    #     pc_matrix = global_pc_raw.sum(axis=0)  # [num_UE, num_UE]
+    #     ui_matrix = global_ui_raw.sum(axis=0)  # [num_UE, num_UE]
+    #     src, dst = np.meshgrid(np.arange(num_UE), np.arange(num_UE), indexing='ij')
+    #     mask = src != dst  # Exclude self-loops
+    #     ue_ue_edge_index = np.stack([src[mask], dst[mask]], axis=0)  # [2, num_edges]
+    #     ue_ue_edge_attr = np.stack([
+    #         pc_matrix[mask],  # PC values
+    #         ui_matrix[mask]   # UI values
+    #     ], axis=1)  # [num_edges, 2]
+    
+    #     # old
+    #     # ue_ue_edge_index = []
+    #     # ue_ue_edge_attr = []
+        
+    #     # for n in range(num_UE):
+    #     #     for n_prime in range(num_UE):
+    #     #         if n != n_prime: continue
+    #     #         pc_from_prime = global_pc_raw[:, n_prime, n].sum().item()
+    #     #         ui_from_prime = global_ui_raw[:, n_prime, n].sum().item() 
+
+    #     #         ue_ue_edge_index.append([n_prime, n])
+    #     #         ue_ue_edge_attr.append([pc_from_prime, ui_from_prime])
+        
+    #     ue_ue_edge_index = torch.tensor(ue_ue_edge_index, dtype=torch.long).contiguous()
+    #     ue_ue_edge_attr = torch.tensor(ue_ue_edge_attr, dtype=torch.float32)
+    #     data['UE', 'interfere', 'UE'].edge_index = ue_ue_edge_index.to(device)
+    #     data['UE', 'interfere', 'UE'].edge_attr = ue_ue_edge_attr.to(device)
+        
+        
+    # if label_single_all is not None:
+    #     data.y = torch.tensor([label_single_all], dtype=torch.float32).to(device)
+    
+    # if rate is not None:
+    #     #Augment the rate to UE
+    #     assert rate.shape == (num_UE, 1)
+    #     rate = torch.tensor(rate, dtype=torch.float32).to(device)
+    #     data['UE'].x = torch.cat([x_ue, rate], dim=1)
     # else:
-    #     global_ap = torch.zeros(0,1, dtype=torch.float32).to(device)
-    #     edge_index_gap_down_ue = torch.zeros(2,0, dtype=torch.long).contiguous().to(device)
-    #     edge_attr_gap_to_ue = torch.zeros(0,2, dtype=torch.float32).contiguous().to(device)
-    #     edge_index_ue_up_gap = torch.zeros(2,0, dtype=torch.long).contiguous().to(device)
-    #     edge_attr_ue_up_gap = torch.zeros(0,2, dtype=torch.float32).contiguous().to(device)
-        
-        data['GAP'].x = global_ap
-        
-        data['GAP', 'g_down', 'UE'].edge_index = edge_index_gap_down_ue
-        data['GAP', 'g_down', 'UE'].edge_attr = edge_attr_gap_to_ue
-        data['UE', 'g_up', 'GAP'].edge_index = edge_index_ue_up_gap
-        data['UE', 'g_up', 'GAP'].edge_attr = edge_attr_ue_up_gap
-        
-        
-    ## UE-UE edge
-    if tmp_ue_ue_information is not None:
-        global_pc_raw, global_ui_raw = tmp_ue_ue_information
-        
-        pc_matrix = global_pc_raw.sum(axis=0)  # [num_UE, num_UE]
-        ui_matrix = global_ui_raw.sum(axis=0)  # [num_UE, num_UE]
-        src, dst = np.meshgrid(np.arange(num_UE), np.arange(num_UE), indexing='ij')
-        mask = src != dst  # Exclude self-loops
-        ue_ue_edge_index = np.stack([src[mask], dst[mask]], axis=0)  # [2, num_edges]
-        ue_ue_edge_attr = np.stack([
-            pc_matrix[mask],  # PC values
-            ui_matrix[mask]   # UI values
-        ], axis=1)  # [num_edges, 2]
-    
-        # old
-        # ue_ue_edge_index = []
-        # ue_ue_edge_attr = []
-        
-        # for n in range(num_UE):
-        #     for n_prime in range(num_UE):
-        #         if n != n_prime: continue
-        #         pc_from_prime = global_pc_raw[:, n_prime, n].sum().item()
-        #         ui_from_prime = global_ui_raw[:, n_prime, n].sum().item() 
-
-        #         ue_ue_edge_index.append([n_prime, n])
-        #         ue_ue_edge_attr.append([pc_from_prime, ui_from_prime])
-        
-        ue_ue_edge_index = torch.tensor(ue_ue_edge_index, dtype=torch.long).contiguous()
-        ue_ue_edge_attr = torch.tensor(ue_ue_edge_attr, dtype=torch.float32)
-        data['UE', 'interfere', 'UE'].edge_index = ue_ue_edge_index.to(device)
-        data['UE', 'interfere', 'UE'].edge_attr = ue_ue_edge_attr.to(device)
-        
-        
-    if label_single_all is not None:
-        data.y = torch.tensor([label_single_all], dtype=torch.float32).to(device)
-    
-    if rate is not None:
-        #Augment the rate to UE
-        assert rate.shape == (num_UE, 1)
-        rate = torch.tensor(rate, dtype=torch.float32).to(device)
-        data['UE'].x = torch.cat([x_ue, rate], dim=1)
-    else:
-        dummy = torch.zeros(num_UE, 1, dtype=torch.float32).to(device)
-        data['UE'].x = torch.cat([x_ue, dummy], dim=1)
+    #     dummy = torch.zeros(num_UE, 1, dtype=torch.float32).to(device)
+    #     data['UE'].x = torch.cat([x_ue, dummy], dim=1)
     
     data.ap_id = ap_id
     data.sample_id = sample_id

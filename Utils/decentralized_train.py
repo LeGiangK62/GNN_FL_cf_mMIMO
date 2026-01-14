@@ -96,7 +96,7 @@ def fl_train(
         batch = batch.to(device)
         num_graph = batch.num_graphs
         optimizer.zero_grad() 
-        x_dict, attr_dict, _ = model(batch)
+        x_dict, attr_dict, _ = model(batch, isRawData=False)
         loss, min_rate = loss_function(
             batch, x_dict, attr_dict, response, 
             tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
@@ -117,6 +117,44 @@ def fl_train(
         total_graphs += num_graph
 
     return total_loss/total_graphs, total_min_rate/total_graphs, local_gradients
+
+@torch.no_grad()
+def fl_eval(
+        dataLoader, local_models,
+        tau, rho_p, rho_d, num_antenna
+    ):
+
+    send_to_server = get_global_info(
+        dataLoader, local_models,
+        tau=tau, rho_p=rho_p, rho_d=rho_d,
+        num_antenna=num_antenna
+    )
+
+    all_DS = torch.cat([
+        torch.stack([client_data['DS'][:,0,:] for client_data in batch_clients], dim=1)
+        for batch_clients in zip(*send_to_server)
+    ], dim=0)
+
+    all_PC = torch.cat([
+        torch.stack([client_data['PC'][:,0,:] for client_data in batch_clients], dim=1)
+        for batch_clients in zip(*send_to_server)
+    ], dim=0)
+
+    all_UI = torch.cat([
+        torch.stack([client_data['UI'][:,0,:] for client_data in batch_clients], dim=1)
+        for batch_clients in zip(*send_to_server)
+    ], dim=0)
+    
+    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
+
+    min_rate, _ = torch.min(rate, dim=1)
+    
+    # if eval_mode: 
+    #     return min_rate
+    # else:
+    min_rate = torch.mean(min_rate)
+
+    return min_rate
 
 # @torch.no_grad()
 # def fl_eval_rate_old(
@@ -613,7 +651,7 @@ def get_global_info(
             model.eval()
             batch = batch.to(device)
             with torch.no_grad():
-                x_dict, edge_dict, edge_index = model(batch)
+                x_dict, edge_dict, edge_index = model(batch, isRawData=True)
                 # DS_single, PC_single, UI_single = package_calculate(batch, x_dict, tau, rho_p, rho_d)
                 ##
                 num_graphs = batch.num_graphs
@@ -641,7 +679,8 @@ def get_global_info(
                 'channelVarianceRaw': channelVariance.detach(),
                 'phiMatrix': phiMatrix.detach(),
                 'AP': x_dict['AP'].detach(),
-                'power_raw': power_raw.detach()
+                'power_raw': power_raw.detach(),
+                'UE': x_dict['UE'].detach()
             })
             
     return send_to_server
@@ -662,6 +701,42 @@ def distribute_global_info(send_to_server):
         response_all.append(responses_this_ap)
     return response_all
 
+
+def server_return(dataLoader, globalInformation):
+    num_client = len(globalInformation)
+    response_all = []
+
+    for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*dataLoader), zip(*globalInformation))): 
+        aug_batch_list = []
+        all_client_embeddings = [r['UE'] for r in all_response]
+
+        if not all(x.shape == all_client_embeddings[0].shape for x in all_client_embeddings):
+            raise RuntimeError(f"Batch {batch_idx}: Mismatch in UE counts between clients. Cannot stack.")
+        
+        global_ue_context = torch.mean(torch.stack(all_client_embeddings), dim=0)
+        
+        for client_id, (response, batch) in enumerate(zip(all_response, all_loader)):
+            other_pack = []
+            keys_needed = ['DS', 'PC', 'UI']
+            for j in range(num_client):
+                if j != client_id:
+                    full_data = all_response[j]
+                    filtered_data = {k: full_data[k] for k in keys_needed}
+                    other_pack.append(filtered_data)
+
+            aug_batch = batch.clone()
+            new_ue_features = global_ue_context.to(aug_batch['UE'].x.device)
+            aug_batch['UE'].x = torch.cat([aug_batch['UE'].x, new_ue_features], dim=-1)  
+
+            client_data = {
+                'loader': aug_batch,
+                'rate_pack': other_pack
+            }
+            aug_batch_list.append(client_data)
+        response_all.append(aug_batch_list)
+    return response_all
+
+    
 @torch.no_grad()
 def kg_augment_add_AP(
         dataLoader, globalInformation, numGlobalAP, tau, num_antenna, rho_d,
@@ -983,42 +1058,80 @@ def new_ap_information(aggregatedInfor, currentId, numGlobalAp, scheme='mean'):
 # batch['UE', 'up', 'AP'].edge_attr = torch.cat([edge_attr_up_org, up_attr], dim=0).contiguous()
 # augmented_batches[client_id].append(batch)
 
+@torch.no_grad()
+def kg_augment_simple(dataLoader, globalInformation, tau):
+    """
+    Simplified knowledge graph augmentation.
+    Augments UE node features with global information from other APs.
+
+    Args:
+        dataLoader: List of DataLoader (one per client/AP)
+        globalInformation: List of list of dicts containing {DS, PC, UI, ...} from all APs
+        tau: Pilot dimension
+
+    Returns:
+        augmented_batches: List of lists of augmented batches (one list per client)
+    """
+    num_clients = len(globalInformation)
+    augmented_batches = [[] for _ in range(num_clients)]
+
+    # Iterate over synchronized batches across all clients
+    for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*dataLoader), zip(*globalInformation))):
+        # Aggregate global information from ALL APs
+        all_DS = torch.cat([all_response[c]['DS'] for c in range(num_clients)], dim=1)  # [B, M, K]
+        all_PC = torch.cat([all_response[c]['PC'] for c in range(num_clients)], dim=1)  # [B, M, K] or [B, M, K, K]
+        all_UI = torch.cat([all_response[c]['UI'] for c in range(num_clients)], dim=1)  # [B, M, K] or [B, M, K, K]
+
+        # For each client, compute global info excluding itself
+        for client_id, (response, batch) in enumerate(zip(all_response, all_loader)):
+            num_graphs = batch.num_graphs
+            num_UEs = batch['UE'].x.shape[0] // num_graphs
+
+            # Extract original UE features (pilots)
+            ue_pilots = batch['UE'].x[:, :tau]  # [B*K, tau]
+
+            # Compute residual (global - local) for this client
+            # DS: Direct Signal strength
+            ds_global = all_DS.sum(dim=1) - response['DS'].squeeze(1)  # [B, K]
+
+            # PC: Pilot Contamination (sum over interfering UEs if needed)
+            if len(all_PC.shape) == 4:  # [B, M, K, K]
+                pc_global = all_PC.sum(dim=1).sum(dim=2) - response['PC'].squeeze(1).sum(dim=2)  # [B, K]
+            else:  # [B, M, K]
+                pc_global = all_PC.sum(dim=1) - response['PC'].squeeze(1)  # [B, K]
+
+            # UI: User Interference (sum over interfering UEs if needed)
+            if len(all_UI.shape) == 4:  # [B, M, K, K]
+                ui_global = all_UI.sum(dim=1).sum(dim=2) - response['UI'].squeeze(1).sum(dim=2)  # [B, K]
+            else:  # [B, M, K]
+                ui_global = all_UI.sum(dim=1) - response['UI'].squeeze(1)  # [B, K]
+
+            # Normalize to prevent scale issues
+            ds_global = torch.log1p(ds_global)  # [B, K]
+            pc_global = torch.log1p(pc_global)  # [B, K]
+            ui_global = torch.log1p(ui_global)  # [B, K]
+
+            # Flatten to match UE node dimension [B*K, 1]
+            ds_feat = ds_global.reshape(-1, 1)
+            pc_feat = pc_global.reshape(-1, 1)
+            ui_feat = ui_global.reshape(-1, 1)
+
+            # Augment UE features: [pilots | DS_global | PC_global | UI_global]
+            batch['UE'].x = torch.cat([
+                ue_pilots,   # [B*K, tau]
+                ds_feat,     # [B*K, 1]
+                pc_feat,     # [B*K, 1]
+                ui_feat      # [B*K, 1]
+            ], dim=1).contiguous()  # [B*K, tau+3]
+
+            augmented_batches[client_id].append(batch)
+
+    return augmented_batches
+
+
 def kg_augmentation(train_loader, send_to_server, tau):
-    # num_clients = len(send_to_server)
-    
-    # augmented_batches = [[] for _ in range(num_clients)]
-            
-    # for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*train_loader), zip(*send_to_server))):
-    #     ds_sum = torch.stack([all_response[c]['DS'] for c in range(num_clients)], dim=0).sum(dim=0)
-    #     pc_sum = torch.stack([all_response[c]['PC'] for c in range(num_clients)], dim=0).sum(dim=0)
-    #     ui_sum = torch.stack([all_response[c]['UI'] for c in range(num_clients)], dim=0).sum(dim=0)
-        
-        
-    #     for client_id, (response, batch) in enumerate(zip(all_response, all_loader)):
-    #         ds_residual = ds_sum - response['DS']
-    #         pc_residual = pc_sum - response['PC']
-    #         ui_residual = ui_sum - response['UI']
-            
-    #         pc_residual = pc_residual.sum(dim=2)
-    #         ui_residual = ui_residual.sum(dim=2)
-            
-            
-    #         ds_new = torch.log1p(ds_residual.reshape(-1, 1))
-    #         pc_new = torch.log1p(pc_residual.reshape(-1, 1))
-    #         ui_new = torch.log1p(ui_residual.reshape(-1, 1))
-            
-    #         # pc_new = pc_residual[:, 0, :, :].permute(0,2,1).reshape(-1, 6)
-    #         # ui_new = ui_residual[:, 0, :, :].permute(0,2,1).reshape(-1, 6)
-            
-    #         batch['UE'].x =  torch.cat(
-    #             [batch['UE'].x[:,:tau], ds_new, pc_new, ui_new],
-    #             dim=1
-    #         )
-    #         batch['UE'].x = batch['UE'].x.contiguous()
-    #         augmented_batches[client_id].append(batch)
-            
-    # return augmented_batches  
-    return train_loader
+    """Legacy function - redirects to simplified version"""
+    return kg_augment_simple(train_loader, send_to_server, tau)
 
 
 @torch.no_grad()
