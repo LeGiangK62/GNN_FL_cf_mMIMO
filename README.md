@@ -35,9 +35,31 @@ cd GNN_FL_cf_mMIMO
 pip install -r requirements.txt
 ```
 ---
+
+## System scheme
+
+┌─────────────────────────────────────────────────────────────┐
+│  1. ALL APs run forward pass (same time) → get_global_info  │
+│     - Each AP gets: DS, PC, UI, UE embeddings               │
+│                                                             │
+│  2. Server aggregates → server_return                       │
+│     - Augments UE features with global context              │
+│     - Returns rate_pack (other APs' DS/PC/UI)               │
+│                                                             │
+│  3. ALL APs train on augmented data (same time)             │
+│     - Each AP only modifies ITS OWN power                   │
+│     - Uses rate_pack (FROZEN) for global rate calculation   │
+│                                                             │
+│  4. FedAvg aggregates weights                               │
+└─────────────────────────────────────────────────────────────┘
+
+
 ## Running command
 '''bash
 python main.py --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --cen_lr 5e-3 --num_epochs_cen 1000 --hidden_channels 64 --num_gnn_layers 3
+
+python main.py --num_train 500 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --cen_pretrain 01_14_19_18_18_cen --hidden_channels 64 --num_gnn_layers 3 --num_epochs 1 --num_rounds 250 --batch_size 32 --lr 5e-5  --client_fraction 0.3 --eval_plot 
+
 '''
 ---
 ## Citation

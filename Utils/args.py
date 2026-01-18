@@ -30,7 +30,10 @@ def parse_args():
     parser.add_argument('--num_test', type=int, default=200, help="Number of testing samples")
     parser.add_argument('--num_eval', type=int, default=200, help="Number of evaluation samples")
     
+    # FL hyperparameters
+    parser.add_argument('--fl_pretrain', type=str, default=None, help="Name of FL model to load directly without training")
     
+
     # Centralized hyperparameters
     parser.add_argument('--cen_lr', type=float, default=5e-3, help="Centralized learning rate")
     parser.add_argument('--num_epochs_cen', type=int, default=1000, help="Number of Centralized training epochs")

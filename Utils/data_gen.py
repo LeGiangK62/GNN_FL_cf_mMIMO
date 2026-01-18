@@ -119,8 +119,6 @@ def full_het_graph(
         beta_single_sample, gamma_single_sample, 
         label_single_all, phi_single_sample, 
         ap_id=None, sample_id=None, 
-        global_ap_information=None,
-        tmp_ue_ue_information=None
         
     ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
