@@ -41,11 +41,11 @@ def parse_args():
     
     
     # FL Algorithm Parameters
-    parser.add_argument('--fl_scheme', type=str, choices=['fedavg', 'fedavg_gm', 'fedprox', 'fedadam'], default='fedavg', help="Federated Learning scheme")
+    parser.add_argument('--fl_scheme', type=str, choices=['fedavg', 'fedadam', 'fedgm'], default='fedavg', help="Federated Learning scheme")
     parser.add_argument('--client_fraction', type=float, default=1.0, help="Fraction of clients to be selected per round")
     parser.add_argument('--num_global_ap', type=int, default=1, help="Number of Global AP for knowledge graph")
     parser.add_argument('--mu', type=float, default=0.1, help="Weight for gradient matching (if using FedAvgGradMatch)")
-    parser.add_argument('--server_lr',     type=float, default=1e-2,  help="Server LR for FedAdam")
+    parser.add_argument('--server_lr',     type=float, default=1e-2,  help="Server LR")
     parser.add_argument('--server_beta1',  type=float, default=0.9,   help="Server beta1 for FedAdam")
     parser.add_argument('--server_beta2',  type=float, default=0.99,  help="Server beta2 for FedAdam")
     parser.add_argument('--server_eps',    type=float, default=1e-8,  help="Server eps for FedAdam")

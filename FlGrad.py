@@ -1,9 +1,7 @@
 import time
 import os
-import copy
 
-from datetime import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 
 import scipy.io
@@ -17,9 +15,8 @@ from Models.GNN import APHetNet, APHetNetFL
 from Utils.args import parse_args
 from Utils.centralized_train import cen_eval, cen_train, cen_loss_function
 from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
-# from Utils.decentralized_train import fl_train, fl_eval_rate, get_global_info, distribute_global_info, kg_augment_simple
-from Utils.decentralized_train import server_return, distribute_global_info, get_global_info, fl_train, fl_eval, server_return_with_guide
 
+from Utils.fl_train import fl_train, get_global_info, server_return, fl_eval, server_return_GAP
 
 
 SAVE_DIR = 'results'
@@ -49,7 +46,7 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    timestamp = time.strftime('%m_%d_%H_%M_%S', time.localtime(time.time()))
+    timestamp = time.strftime('%y_%m_%d_%H_%M_%S', time.localtime(time.time()))
     init_folder()
     
     args = parse_args()
@@ -275,11 +272,17 @@ if __name__ == '__main__':
         metadata=tt_meta,
         dim_dict=dim_dict,
         out_channels=hidden_channels,
-        aug_feat_dim=4,  # DS, PC, UI, rate_without_me + 3?
+        aug_feat_dim=0,  # DS, PC, UI, rate_without_me + 3?
         num_layers=num_gnn_layers,
         hid_layers=hidden_channels//2,
         isDecentralized=False  # Use same architecture as centralized
     ).to(device)
+
+    global_optimizer = torch.optim.AdamW(global_model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
+
+    global_scheduler = torch.optim.lr_scheduler.StepLR(
+        global_optimizer, step_size=num_rounds//3, gamma=0.5
+    )
 
     # Optional: Warm-start from centralized model (transfer learning)
     # if cen_pretrain is not None:
@@ -297,7 +300,7 @@ if __name__ == '__main__':
             metadata=tt_meta,
             dim_dict=dim_dict,
             out_channels=hidden_channels,
-            aug_feat_dim=4,  # DS, PC, UI, rate_without_me + 3?
+            aug_feat_dim=0,  # DS, PC, UI, rate_without_me + 3?
             num_layers=num_gnn_layers,
             hid_layers=hidden_channels//2,
             isDecentralized=False
@@ -309,8 +312,15 @@ if __name__ == '__main__':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_rounds, eta_min=1e-5)
         schedulers.append(scheduler)
     
-    # fed = FedSoftMin(client_fraction=client_fraction)
-    fed = FedSoftMin(client_fraction=client_fraction, server_lr=0.1)
+    from Utils.fl_train import FedAvg, FedAdam, FedGM, sample_clients
+    if args.fl_scheme == 'fedavg':
+        fed = FedAvg(client_fraction=client_fraction)
+    elif args.fl_scheme == 'fedadam':
+        fed = FedAdam(client_fraction=client_fraction)
+    elif args.fl_scheme == 'fedgm':
+        fed = FedGM(client_fraction=client_fraction, server_lr=args.server_lr)
+    else:
+        raise ValueError(f'Handling global update in {args.fl_scheme.upper()} is not supported!')
     
     ## Training FL-GNN
     
@@ -320,7 +330,7 @@ if __name__ == '__main__':
     ### Training loop
     if args.fl_pretrain is None:
         start_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-        print(f"\n ===={start_time}==== Training FL-GNN ... ")
+        print(f"\n ===={start_time}==== Training FL-GNN using {args.fl_scheme.upper()} ... ")
         start_time = time.time()
         print(f'Optimal rate: train {np.mean(opt_train_rates[train_idx])}, test {np.mean(opt_train_rates[test_idx])}')
         for round in range(num_rounds):
@@ -331,53 +341,49 @@ if __name__ == '__main__':
                 train_loader, local_models,
                 tau=tau, rho_p=rho_p, rho_d=rho_d,
                 num_antenna=num_antenna
-            )
-            
-            ## Extract the information from server to update the client_train_loader
-            response_from_server = server_return(train_loader, send_to_server, num_antenna=num_antenna)
-            # response_from_server = server_return_with_guide(train_loader, send_to_server, num_antenna, 
-            #                          temperature=0.5, min_weight=0.5)
-            ## Train local models
-            local_weights = []
+            )            
+            # response_from_server = server_return(train_loader, send_to_server, num_antenna=num_antenna)
+            response_from_server = server_return_GAP(train_loader, send_to_server, num_antenna=num_antenna)
+
             local_gradients = []
-            total_loss = 0.0
-            total_rate = 0.0
-            selected_clients = fed.sample_clients(num_clients)
+            local_rates = []
+            # total_rate = 0.0
+            # total_loss = 0.0
+            selected_clients = sample_clients(client_fraction, num_clients)
 
             for client_idx, (model, opt, client_data_tuple) in enumerate(zip(local_models, optimizers, zip(*response_from_server))):
                 batches = [item['loader'] for item in client_data_tuple]
                 batch_rate = [item['rate_pack'] for item in client_data_tuple]
+
                 if client_idx not in selected_clients:
-                    local_weights.append(copy.deepcopy(model.state_dict()))
-                    local_gradients.append(None)
                     continue
-                for epoch in range(num_epochs):
-                    train_loss, train_min, local_gradient, local_rates = fl_train(
+                
+                # client_loss_sum = 0.0
+                # client_rate_sum = 0.0
+                for _ in range(num_epochs):
+                    train_loss, train_min = fl_train(
                         batches,
                         batch_rate,
                         model, opt,
                         tau=tau, rho_p=rho_p, rho_d=rho_d,
                         num_antenna=num_antenna,
                     )
-                local_weights.append(copy.deepcopy(model.state_dict()))
-                local_gradients.append(local_gradient)
-                total_loss += train_loss
-                total_rate += train_min
+                #     client_loss_sum += train_loss
+                #     client_rate_sum += train_min
+                # train_loss = client_loss_sum / num_epochs
+                # train_min = client_rate_sum / num_epochs
 
-            avg_loss = total_loss / len(selected_clients)
-            avg_rate = total_rate / len(selected_clients)
-            
+                # total_loss += train_loss
+                # total_rate += train_min
 
-            # Global update: Avg
-            # global_weights = fed.aggregate(local_weights, selected_clients)
-            # global_weights = fed.aggregate(local_weights, selected_clients, global_model.state_dict())
-            # FedSoftMin
-            # global_weights = fed.aggregate(local_gradients, local_rates, global_model.state_dict(), selected_clients)
-            global_weights = fed.aggregate(local_weights, local_rates, selected_clients)
+            # avg_loss = total_loss / len(selected_clients)
+            # avg_rate = total_rate / len(selected_clients)
+
+            global_weights = fed.aggregate(global_model, local_models, selected_clients)
+
             global_model.load_state_dict(global_weights)
-            # Update global models
             for model in local_models:
-                model.load_state_dict(global_weights)
+                model.load_state_dict(global_model.state_dict())
 
 
             if round % eval_round == 0:
@@ -398,16 +404,32 @@ if __name__ == '__main__':
                 fl_all_rate_test.append(total_eval_rate)
 
                 print(f"Round {round+1:03d}/{num_rounds}: "
-                    f"Avg Train Loss = {avg_loss:.4f} | "
+                    # f"Avg Loss = {avg_loss:.4f} | "
+                    # f"Avg Min Rate = {avg_rate:.4f} | "
                     f"Avg Train Rate = {total_train_rate:.4f} | "
                     f"Avg Eval Rate = {total_eval_rate:.4f} | "
                 )
-            for scheduler in schedulers:
-                scheduler.step()
+            for client_idx in selected_clients:
+                schedulers[client_idx].step()
         
         end_time = time.time()
         execution_time = end_time - start_time
         print(f"Execution Time: {timedelta(seconds=execution_time)}")
+
+        plt.figure(figsize=(6,4), dpi=180)
+        plt.plot(fl_all_rate, label='Training Rate', linewidth=2)
+        plt.plot(fl_all_rate_test, label='Testing Rate', linewidth=2)
+        plt.axhline(y=np.mean(opt_train_rates[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
+        plt.axhline(y=np.mean(opt_train_rates[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
+        plt.xlabel('Epoch', fontsize=12)
+        plt.ylabel('Rate', fontsize=12)
+        plt.title(f'{args.fl_scheme.upper()}  GNN Training Rate Curve - {args.lr}_{args.num_rounds}', fontsize=14)
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.legend()
+        plt.tight_layout()
+        figure_name = f'{timestamp}_fl'
+        save_path = TRAIN_DIR + f'{figure_name}.png' 
+        plt.savefig(save_path, dpi=300) 
 
         fl_model_filename = f'{MODEL_DIR}/{timestamp}_fl.pth'
         torch.save(global_model.state_dict(), fl_model_filename)
@@ -468,8 +490,8 @@ if __name__ == '__main__':
         plt.legend(fontsize = 14)
         plt.grid()
         
-        figure_name = f'{timestamp}_eval_cen'
+        figure_name = f'{timestamp}_eval'
         eval_path = EVAL_DIR + f'/{figure_name}.png' 
-        plt.savefig(eval_path, dpi=300)  
+        plt.savefig(eval_path, dpi=300, bbox_inches='tight')
         print(f'Save Evaluation figure to {eval_path}.')
     

@@ -84,6 +84,75 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p,
     return loss, min_rate_detach
 
 
+def loss_function_guided(graphData, nodeFeatDict, edgeDict, clientResponse, 
+                         tau, rho_p, rho_d, num_antenna, alpha=0.5):
+    """
+    Compute loss with server guidance weights to prioritize bottleneck UE.
+
+    Loss = alpha * (-min_rate) + (1-alpha) * (-weighted_rate)
+
+    Where weighted_rate uses guidance_weights from server to focus on bottleneck.
+
+    Args:
+        graphData: HeteroData batch
+        nodeFeatDict: Node features from model
+        edgeDict: Edge features from model
+        clientResponse: List of dicts with DS/PC/UI from other clients
+        guidance_weights: [B, K] weights from server (higher for bottleneck UE)
+        tau, rho_p, rho_d, num_antenna: Communication parameters
+        alpha: balance between min-rate (fairness) and guided (bottleneck focus)
+               alpha=1: pure min-rate, alpha=0: pure guided
+
+    Returns:
+        loss: Scalar loss value
+        min_rate_detach: [B] tensor of min rates for monitoring
+    """
+    num_graphs = graphData.num_graphs
+    num_UEs = graphData['UE'].x.shape[0] // num_graphs
+    num_APs = graphData['AP'].x.shape[0] // num_graphs
+
+    pilot_matrix = graphData['UE'].x[:, :tau].reshape(num_graphs, num_UEs, -1)
+
+    large_scale = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:, :, :, 0]
+    power_matrix_raw = edgeDict['AP', 'down', 'UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:, :, :, -1]
+
+    large_scale = torch.expm1(large_scale)
+    channel_variance = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:, :, :, 1]
+
+    power_matrix_raw = power_matrix_raw[:, :1, :]
+    channel_variance = channel_variance[:, :1, :]
+    large_scale = large_scale[:, :1, :]
+
+    power_matrix = power_from_raw(power_matrix_raw, channel_variance, num_antenna)
+    DS_k, PC_k, UI_k = component_calculate(power_matrix, channel_variance, large_scale, pilot_matrix, rho_d=rho_d)
+
+    guidance_weights = graphData['UE'].x[:, -3].reshape(num_graphs, num_UEs)
+    all_DS = [DS_k] + [r['DS'] for r in clientResponse]
+    all_PC = [PC_k] + [r['PC'] for r in clientResponse]
+    all_UI = [UI_k] + [r['UI'] for r in clientResponse]
+
+    all_DS = torch.cat(all_DS, dim=1)
+    all_PC = torch.cat(all_PC, dim=1)
+    all_UI = torch.cat(all_UI, dim=1)
+
+    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)  # [B, K]
+    min_rate_detach, _ = torch.min(rate.detach(), dim=1)
+
+    # === Combined Loss ===
+    # 1. Min-rate loss (fairness - ensures we don't hurt the worst UE)
+    min_rate, _ = torch.min(rate, dim=1)
+    loss_min = -min_rate.mean()
+
+    # 2. Guided loss (focus on bottleneck using server weights)
+    # guidance_weights: [B, K] - higher for bottleneck UE
+    # Weighted sum: UEs with higher weight contribute more to loss
+    weighted_rate = (guidance_weights * rate).sum(dim=1)  # [B]
+    loss_guided = -weighted_rate.mean()
+
+    # 3. Combined loss
+    loss = alpha * loss_min + (1 - alpha) * loss_guided
+
+    return loss, min_rate_detach
 
 
 def fl_train(
@@ -120,9 +189,10 @@ def fl_train(
         optimizer.zero_grad()
         x_dict, attr_dict, _ = model(batch, isRawData=False)
         loss, min_rate = loss_function(
+        # loss, min_rate = loss_function_guided(
             batch, x_dict, attr_dict, response,
             tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
-            epochRatio=epochRatio
+            # epochRatio=epochRatio,
         )
         loss.backward()
         optimizer.step()
@@ -546,7 +616,77 @@ class FedSoftMin:
             new_weights[key] = weighted_avg
 
         return new_weights
-    
+
+    def aggregate_gradients(self, local_gradients, local_rates, global_weights, selected_clients):
+        """
+        Server tính toán và update global model từ gradients của clients.
+
+        Flow:
+        1. Lọc gradients và rates từ selected clients
+        2. Tính weights dựa trên rate (soft-min: rate thấp → weight cao)
+        3. Tính weighted average của gradients
+        4. Update global weights: w_new = w_old - server_lr * (momentum * velocity + avg_grad)
+
+        Args:
+            local_gradients: list of gradient dicts từ mỗi client (None nếu không được select)
+            local_rates: list of rate tensors từ mỗi client
+            global_weights: state_dict của global model hiện tại
+            selected_clients: indices của clients tham gia round này
+
+        Returns:
+            new_weights: updated global weights
+        """
+        # 1. Lọc valid gradients và rates
+        valid_grads = []
+        valid_rates = []
+        for i in selected_clients:
+            if local_gradients[i] is not None:
+                valid_grads.append(local_gradients[i])
+                # Concatenate all batch rates for this client
+                if isinstance(local_rates[i], list):
+                    client_rate = torch.cat(local_rates[i])
+                else:
+                    client_rate = local_rates[i]
+                valid_rates.append(client_rate)
+
+        if len(valid_grads) == 0:
+            return global_weights
+
+        # 2. Tính client weights dựa trên rate (soft-min weighting)
+        # Client với rate thấp → weight cao hơn
+        rate_scores = torch.stack([r.mean() for r in valid_rates])  # [num_selected]
+        client_weights = torch.softmax(-rate_scores / self.T, dim=0)  # [num_selected]
+
+        # 3. Tính weighted average của gradients
+        avg_grad = {}
+        for key in valid_grads[0].keys():
+            stacked = torch.stack([g[key].float() for g in valid_grads], dim=0)
+            weight_shape = [-1] + [1] * (stacked.dim() - 1)
+            weighted_sum = (client_weights.view(*weight_shape).to(stacked.device) * stacked).sum(dim=0)
+            avg_grad[key] = weighted_sum
+
+        # 4. Update global weights với momentum
+        if self.velocity is None:
+            self.velocity = {}
+
+        new_weights = {}
+        for key in global_weights.keys():
+            if key in avg_grad:
+                # Initialize velocity nếu chưa có
+                if key not in self.velocity:
+                    self.velocity[key] = torch.zeros_like(avg_grad[key])
+
+                # Momentum update: v = momentum * v + grad
+                self.velocity[key] = self.momentum * self.velocity[key] + avg_grad[key]
+
+                # Update weights: w = w - lr * v
+                new_weights[key] = global_weights[key] - self.server_lr * self.velocity[key]
+            else:
+                # Không có gradient cho key này → giữ nguyên
+                new_weights[key] = global_weights[key]
+
+        return new_weights
+
 
 class FedAdam:
     def __init__(self, client_fraction=0.3, lr=1e-3, beta1=0.9, beta2=0.99, eps=1e-8):
@@ -623,7 +763,6 @@ class FedAvg:
     
     @torch.no_grad()
     def sample_clients(self, num_clients):
-        """Randomly select participating clients for this round."""
         num_selected = max(1, int(self.client_fraction * num_clients))
         return sorted(random.sample(range(num_clients), num_selected))
 
@@ -698,9 +837,11 @@ def get_global_info(
                 num_graphs = batch.num_graphs
                 num_UEs = x_dict['UE'].shape[0] // num_graphs
                 num_APs = x_dict['AP'].shape[0] // num_graphs
-                
+                edge_attr_up_full = edge_dict['AP','down','UE']
+                edge_attr_down_full = edge_dict['AP','down','UE']
+
                 largeScale = batch['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
-                power_raw = edge_dict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
+                power_raw = edge_attr_up_full.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
                     
                 largeScale = torch.expm1(largeScale)
                 phiMatrix = batch['UE'].x[:,:tau].reshape(num_graphs, num_UEs, -1)
@@ -718,6 +859,8 @@ def get_global_info(
                 "UI": UI_single.detach(),
                 'largeScaleRaw': largeScale.detach(),
                 'channelVarianceRaw': channelVariance.detach(),
+                'edge_up': edge_attr_up_full.detach(),
+                'edge_down': edge_attr_down_full.detach(),
                 'phiMatrix': phiMatrix.detach(),
                 'AP': x_dict['AP'].detach(),
                 'power_raw': power_raw.detach(),
@@ -833,6 +976,150 @@ def server_return(dataLoader, globalInformation, num_antenna=1):
 
 
 ########################################################################
+# Server Return with Guidance Weights for Bottleneck UE
+########################################################################
+def server_return_with_guide(dataLoader, globalInformation, num_antenna=1, temperature=0.5, min_weight=0.5):
+    """
+    Augment client data with guidance weights to prioritize bottleneck UE.
+
+    Server identifies the UE with lowest rate and creates weights for each UE.
+    Weights encourage APs to focus on bottleneck UE while not neglecting others.
+
+    Weight design:
+    - Bottleneck UE gets higher weight
+    - Other UEs still get reasonable weight (min_weight) to avoid degradation
+    - Smooth transition using softmax with temperature
+
+    Args:
+        dataLoader: list of dataloaders for each client
+        globalInformation: output from get_global_info()
+        num_antenna: number of antennas
+        temperature: controls sharpness of weight distribution (lower = more focus on bottleneck)
+        min_weight: minimum weight for non-bottleneck UEs (prevents neglecting them)
+
+    Returns:
+        response_all: list of augmented batches with guidance weights
+    """
+    num_client = len(globalInformation)
+    response_all = []
+
+    for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*dataLoader), zip(*globalInformation))):
+        aug_batch_list = []
+        all_client_embeddings = [r['UE'] for r in all_response]
+
+        # === 1. Compute GLOBAL rate to find bottleneck UE ===
+        stacked_DS_full = torch.stack([r['DS'] for r in all_response], dim=0)  # [num_client, B, 1, K]
+        stacked_PC_full = torch.stack([r['PC'] for r in all_response], dim=0)  # [num_client, B, 1, K', K]
+        stacked_UI_full = torch.stack([r['UI'] for r in all_response], dim=0)  # [num_client, B, 1, K', K]
+
+        # Compute global rate with all APs
+        global_rate = rate_from_component(
+            stacked_DS_full[:,:,0,:].permute(1, 0, 2),  # [B, num_client, K]
+            stacked_PC_full[:,:,0,:,:].permute(1, 0, 2, 3),
+            stacked_UI_full[:,:,0,:,:].permute(1, 0, 2, 3),
+            num_antenna
+        )  # [B, K]
+
+        # === 2. Create guidance weights ===
+        # Lower rate -> higher weight (using negative rate in softmax)
+        # w_k = softmax(-rate_k / temperature)
+        rate_weights_raw = torch.softmax(-global_rate / temperature, dim=1)  # [B, K]
+
+        # Scale weights: map from [0,1] to [min_weight, 1]
+        # This ensures non-bottleneck UEs still get at least min_weight
+        rate_weights = min_weight + (1 - min_weight) * rate_weights_raw  # [B, K]
+
+        # Normalize so mean weight = 1 (preserves total gradient magnitude)
+        rate_weights = rate_weights / rate_weights.mean(dim=1, keepdim=True)  # [B, K]
+
+        # Find bottleneck UE info for reference
+        bottleneck_ue_idx = global_rate.argmin(dim=1)  # [B]
+        bottleneck_ue_rate = global_rate.min(dim=1).values  # [B]
+
+        # Rate gap: how far each UE is from the bottleneck
+        rate_gap = global_rate - bottleneck_ue_rate.unsqueeze(1)  # [B, K], >= 0
+
+        # Get batch info
+        num_graphs = all_loader[0].num_graphs
+        num_UEs = all_loader[0]['UE'].x.shape[0] // num_graphs
+
+        # For UE augmentation features
+        stacked_DS = torch.stack([r['DS'][:,0,:] for r in all_response], dim=0)  # [num_client, B, K]
+        stacked_PC = torch.stack([r['PC'][:,0,:,:].sum(dim=2) for r in all_response], dim=0)
+        stacked_UI = torch.stack([r['UI'][:,0,:,:].sum(dim=2) for r in all_response], dim=0)
+
+        if not all(x.shape == all_client_embeddings[0].shape for x in all_client_embeddings):
+            raise RuntimeError(f"Batch {batch_idx}: Mismatch in UE counts between clients.")
+
+        global_ue_context = torch.mean(torch.stack(all_client_embeddings), dim=0)
+
+        # === 3. Create augmented data for each client ===
+        for client_id, (response, batch) in enumerate(zip(all_response, all_loader)):
+            other_pack = []
+            keys_needed = ['DS', 'PC', 'UI']
+            for j in range(num_client):
+                if j != client_id:
+                    filtered_data = {k: all_response[j][k] for k in keys_needed}
+                    other_pack.append(filtered_data)
+
+            aug_batch = batch.clone()
+            device = aug_batch['UE'].x.device
+
+            # Self-exclusion mask
+            mask = torch.arange(num_client) != client_id
+
+            # Self-exclusion for UE context
+            new_ue_features = ((global_ue_context * num_client - all_client_embeddings[client_id]) / (num_client - 1)).to(device)
+
+            # Self-exclusion for DS/PC/UI
+            other_DS = stacked_DS[mask].mean(dim=0).reshape(-1, 1).to(device)
+            other_PC = stacked_PC[mask].mean(dim=0).reshape(-1, 1).to(device)
+            other_UI = stacked_UI[mask].mean(dim=0).reshape(-1, 1).to(device)
+
+            # Compute rate WITHOUT this AP
+            other_DS_full = stacked_DS_full[mask]
+            other_PC_full = stacked_PC_full[mask]
+            other_UI_full = stacked_UI_full[mask]
+
+            other_DS_cat = other_DS_full.permute(1, 0, 2, 3).reshape(num_graphs, num_client - 1, num_UEs)
+            other_PC_cat = other_PC_full.permute(1, 0, 2, 3, 4).reshape(num_graphs, num_client - 1, num_UEs, num_UEs)
+            other_UI_cat = other_UI_full.permute(1, 0, 2, 3, 4).reshape(num_graphs, num_client - 1, num_UEs, num_UEs)
+
+            rate_without_me = rate_from_component(other_DS_cat, other_PC_cat, other_UI_cat, num_antenna)
+
+            # Marginal contribution of this AP
+            marginal_contribution = (global_rate - rate_without_me).reshape(-1, 1).to(device)  # [B*K, 1]
+
+            # Flatten weights and rate_gap for UE features
+            weights_flat = rate_weights.reshape(-1, 1).to(device)  # [B*K, 1]
+            rate_gap_flat = rate_gap.reshape(-1, 1).to(device)  # [B*K, 1]
+            global_rate_flat = global_rate.reshape(-1, 1).to(device)  # [B*K, 1]
+
+            # Augment UE features with guidance info
+            aug_batch['UE'].x = torch.cat([
+                aug_batch['UE'].x,
+                new_ue_features,
+                other_DS, other_PC, other_UI,
+                marginal_contribution,
+                weights_flat,        # Guidance weight for this UE
+                rate_gap_flat,       # How far from bottleneck
+                global_rate_flat,    # Current global rate
+            ], dim=-1)
+
+            client_data = {
+                'loader': aug_batch,
+                'rate_pack': other_pack,
+                'guidance_weights': rate_weights.to(device),      # [B, K] - weights for loss
+                'bottleneck_ue': bottleneck_ue_idx.to(device),    # [B] - index of bottleneck
+                'bottleneck_rate': bottleneck_ue_rate.to(device), # [B] - rate of bottleneck
+                'global_rate': global_rate.to(device),            # [B, K] - full rate matrix
+            }
+            aug_batch_list.append(client_data)
+        response_all.append(aug_batch_list)
+    return response_all
+
+
+########################################################################
 # Server Return with Bottleneck UE Identification
 ########################################################################
 def server_return_with_bottleneck(dataLoader, globalInformation, num_antenna=1):
@@ -912,9 +1199,17 @@ def server_return_with_bottleneck(dataLoader, globalInformation, num_antenna=1):
 @torch.no_grad()
 def server_return_with_gap(dataLoader, globalInformation, num_global_ap=None, num_antenna=1):
     """
-    Augment each client's graph with Virtual Global AP nodes.
-    num_global_ap = None means use ALL other APs (num_clients - 1)
-    Each GAP is a direct copy of another AP (no aggregation).
+    Augment each client's graph with Virtual Global AP (GAP) nodes.
+    Each GAP represents one of the other APs (no aggregation).
+
+    Args:
+        dataLoader: list of dataloaders for each client
+        globalInformation: output from get_global_info()
+        num_global_ap: None means use ALL other APs (num_clients - 1)
+        num_antenna: number of antennas
+
+    Returns:
+        response_all: list of augmented batches with GAP nodes
     """
     num_client = len(globalInformation)
     response_all = []
@@ -927,19 +1222,23 @@ def server_return_with_gap(dataLoader, globalInformation, num_global_ap=None, nu
         aug_batch_list = []
 
         # Gather all APs' info
-        all_ap_emb = torch.stack([r['AP'] for r in all_response], dim=1)  # [B, num_AP, dim]
-        all_ue_emb = torch.stack([r['UE'] for r in all_response], dim=0)  # [num_AP, B*K, dim]
-        all_DS = torch.stack([r['DS'][:,0,:] for r in all_response], dim=1)  # [B, num_AP, K]
-        all_PC = torch.stack([r['PC'][:,0,:,:] for r in all_response], dim=1)  # [B, num_AP, K', K]
-        all_UI = torch.stack([r['UI'][:,0,:,:] for r in all_response], dim=1)  # [B, num_AP, K', K]
-        all_power = torch.stack([r['power_raw'][:,0,:] for r in all_response], dim=1)  # [B, num_AP, K]
-        all_large_scale = torch.stack([r['largeScaleRaw'][:,0,:] for r in all_response], dim=1)  # [B, num_AP, K]
-        all_channel_var = torch.stack([r['channelVarianceRaw'][:,0,:] for r in all_response], dim=1)  # [B, num_AP, K]
+        all_ap_emb = torch.stack([r['AP'] for r in all_response], dim=1)  # [B, num_client, dim]
+        all_ue_emb = torch.stack([r['UE'] for r in all_response], dim=0)  # [num_client, B*K, dim]
+        all_DS = torch.stack([r['DS'][:,0,:] for r in all_response], dim=1)  # [B, num_client, K]
+        all_PC = torch.stack([r['PC'][:,0,:,:] for r in all_response], dim=1)  # [B, num_client, K', K]
+        all_UI = torch.stack([r['UI'][:,0,:,:] for r in all_response], dim=1)  # [B, num_client, K', K]
+        all_power = torch.stack([r['power_raw'][:,0,:] for r in all_response], dim=1)  # [B, num_client, K]
+        all_large_scale = torch.stack([r['largeScaleRaw'][:,0,:] for r in all_response], dim=1)  # [B, num_client, K]
+        all_channel_var = torch.stack([r['channelVarianceRaw'][:,0,:] for r in all_response], dim=1)  # [B, num_client, K]
+
+        # Edge features from all APs: [num_client, B*K, edge_dim]
+        edge_up_full = torch.stack([r['edge_up'] for r in all_response], dim=0)
+        edge_down_full = torch.stack([r['edge_down'] for r in all_response], dim=0)
 
         # === Compute rate WITH all APs ===
-        full_DS = torch.cat([r['DS'] for r in all_response], dim=1)  # [B, num_AP, K]
-        full_PC = torch.cat([r['PC'] for r in all_response], dim=1)  # [B, num_AP, K', K]
-        full_UI = torch.cat([r['UI'] for r in all_response], dim=1)  # [B, num_AP, K', K]
+        full_DS = torch.cat([r['DS'] for r in all_response], dim=1)  # [B, num_client, K]
+        full_PC = torch.cat([r['PC'] for r in all_response], dim=1)  # [B, num_client, K', K]
+        full_UI = torch.cat([r['UI'] for r in all_response], dim=1)  # [B, num_client, K', K]
         rate_with_all = rate_from_component(full_DS, full_PC, full_UI, num_antenna)  # [B, K]
 
         for client_id, (response, batch) in enumerate(zip(all_response, all_loader)):
@@ -947,67 +1246,69 @@ def server_return_with_gap(dataLoader, globalInformation, num_global_ap=None, nu
             device = aug_batch['UE'].x.device
             num_graphs = aug_batch.num_graphs
             num_ues = aug_batch['UE'].x.shape[0] // num_graphs
-            num_aps = aug_batch['AP'].x.shape[0] // num_graphs  # Should be 1
 
             # === Get indices of other APs (exclude self) ===
             other_indices = [j for j in range(num_client) if j != client_id]
-            n_gaps = len(other_indices)  # = num_client - 1 = 29
+            n_gaps = len(other_indices)  # = num_client - 1
 
             # === 1. Create GAP node features (one per other AP) ===
             # Each GAP gets that AP's embedding directly (no aggregation)
+            # all_ap_emb: [B, num_client, dim]
             gap_feats = all_ap_emb[:, other_indices, :]  # [B, n_gaps, dim]
             gap_feats = gap_feats.reshape(-1, gap_feats.shape[-1])  # [B*n_gaps, dim]
 
-            # === 2. Create GAP -> UE edge features (one set per GAP) ===
-            # Each GAP has edges to all UEs with that AP's specific info
-            gap_edge_feats_list = []
+            # === 2. Create edge indices for GAP <-> UE ===
+            # Each GAP connects to all UEs in its corresponding graph
+            # GAP node layout: [graph0_gap0, graph0_gap1, ..., graph0_gap_{n-1}, graph1_gap0, ...]
+            # UE node layout: [graph0_ue0, graph0_ue1, ..., graph1_ue0, ...]
             gap_down_ue_edges = []
             ue_up_gap_edges = []
 
-            for gap_local_idx, other_ap_idx in enumerate(other_indices):
-                # Edge features for this GAP: [B, K] each
-                this_DS = all_DS[:, other_ap_idx, :]  # [B, K]
-                this_PC = all_PC[:, other_ap_idx, :, :].sum(dim=1)  # [B, K] - sum over interferers
-                this_UI = all_UI[:, other_ap_idx, :, :].sum(dim=1)  # [B, K]
-                this_power = all_power[:, other_ap_idx, :]  # [B, K]
-                this_large_scale = all_large_scale[:, other_ap_idx, :]  # [B, K]
-                this_channel_var = all_channel_var[:, other_ap_idx, :]  # [B, K]
-
-                # Stack edge features: [B, K, 6] -> [B*K, 6]
-                this_edge_feat = torch.stack([
-                    this_large_scale,
-                    this_channel_var,
-                    this_DS,
-                    this_PC,
-                    this_UI,
-                    this_power,
-                ], dim=-1).reshape(-1, 6)
-                gap_edge_feats_list.append(this_edge_feat)
-
-                # Edge indices for this GAP
-                for g in range(num_graphs):
-                    gap_offset = g * n_gaps + gap_local_idx  # GAP index in flattened batch
-                    ue_offset = g * num_ues
-                    for ue in range(num_ues):
-                        gap_down_ue_edges.append([gap_offset, ue_offset + ue])
-                        ue_up_gap_edges.append([ue_offset + ue, gap_offset])
-
-            # Stack all edge features: [n_gaps * B * K, 6]
-            gap_edge_feat = torch.cat(gap_edge_feats_list, dim=0)
+            for g in range(num_graphs):
+                gap_offset = g * n_gaps  # Starting GAP index for this graph
+                ue_offset = g * num_ues   # Starting UE index for this graph
+                for gap_local_idx in range(n_gaps):
+                    gap_idx = gap_offset + gap_local_idx
+                    for ue_local_idx in range(num_ues):
+                        ue_idx = ue_offset + ue_local_idx
+                        gap_down_ue_edges.append([gap_idx, ue_idx])
+                        ue_up_gap_edges.append([ue_idx, gap_idx])
 
             gap_down_ue_idx = torch.tensor(gap_down_ue_edges, dtype=torch.long, device=device).t().contiguous()
             ue_up_gap_idx = torch.tensor(ue_up_gap_edges, dtype=torch.long, device=device).t().contiguous()
 
-            # === 3. Add GAP nodes and edges to graph ===
+            # === 3. Create edge features for GAP <-> UE ===
+            # Each GAP has its own edge features (from the corresponding other AP)
+            # edge_up_full: [num_client, B*K, edge_dim]
+            # We need: [n_gaps * B * K, edge_dim] for all GAP->UE edges
+
+            # Get edge features from other APs (excluding self)
+            other_edge_down = edge_down_full[other_indices]  # [n_gaps, B*K, edge_dim]
+            other_edge_up = edge_up_full[other_indices]      # [n_gaps, B*K, edge_dim]
+
+            # Reshape to match edge order: for each graph, for each GAP, for each UE
+            # Current: [n_gaps, B*K, edge_dim] where B*K is flattened across all graphs
+            # Need: [B*n_gaps*K, edge_dim] ordered as (g0_gap0_ue0, g0_gap0_ue1, ..., g0_gap1_ue0, ...)
+
+            # First reshape to [n_gaps, B, K, edge_dim]
+            edge_dim = other_edge_down.shape[-1]
+            other_edge_down = other_edge_down.reshape(n_gaps, num_graphs, num_ues, edge_dim)
+            other_edge_up = other_edge_up.reshape(n_gaps, num_graphs, num_ues, edge_dim)
+
+            # Permute to [B, n_gaps, K, edge_dim] then flatten to [B*n_gaps*K, edge_dim]
+            edge_down_feat = other_edge_down.permute(1, 0, 2, 3).reshape(-1, edge_dim)
+            edge_up_feat = other_edge_up.permute(1, 0, 2, 3).reshape(-1, edge_dim)
+
+            # === 4. Add GAP nodes and edges to graph ===
             aug_batch['GAP'].x = gap_feats.to(device)
 
             aug_batch['GAP', 'down', 'UE'].edge_index = gap_down_ue_idx
-            aug_batch['GAP', 'down', 'UE'].edge_attr = gap_edge_feat.to(device)
+            aug_batch['GAP', 'down', 'UE'].edge_attr = edge_down_feat.to(device)
 
             aug_batch['UE', 'up', 'GAP'].edge_index = ue_up_gap_idx
-            aug_batch['UE', 'up', 'GAP'].edge_attr = gap_edge_feat.to(device)
+            aug_batch['UE', 'up', 'GAP'].edge_attr = edge_up_feat.to(device)
 
-            # === 4. Compute rate difference (marginal contribution) ===
+            # === 5. Compute rate difference (marginal contribution of this AP) ===
             mask = torch.arange(num_client, device=device) != client_id
             rate_without_me = rate_from_component(
                 all_DS[:, mask, :],
@@ -1017,30 +1318,36 @@ def server_return_with_gap(dataLoader, globalInformation, num_global_ap=None, nu
             )
             rate_diff = (rate_with_all - rate_without_me).reshape(-1, 1)  # [B*K, 1]
 
-            # === 5. Augment UE features ===
+            # === 6. Aggregate info from other APs for UE augmentation ===
+            other_DS = all_DS[:, mask].mean(dim=1).reshape(-1, 1).to(device)
+            other_PC = all_PC[:, mask].sum(dim=-1).mean(dim=1).reshape(-1, 1).to(device)
+            other_UI = all_UI[:, mask].sum(dim=-1).mean(dim=1).reshape(-1, 1).to(device)
+
+            # === 7. Augment UE features ===
             global_ue_context = all_ue_emb[mask].mean(dim=0)  # [B*K, dim]
             aug_batch['UE'].x = torch.cat([
                 aug_batch['UE'].x,
                 global_ue_context.to(device),
+                other_DS, other_PC, other_UI,
                 rate_diff.to(device)
             ], dim=-1)
-            
-            # === Full Response ===
+
+            # === 8. Full Response (DS/PC/UI from other APs for loss calculation) ===
             other_pack = []
             keys_needed = ['DS', 'PC', 'UI']
             for j in range(num_client):
                 if j != client_id:
                     filtered_data = {k: all_response[j][k] for k in keys_needed}
                     other_pack.append(filtered_data)
-            
+
             client_data = {
                 'loader': aug_batch,
                 'rate_pack': other_pack
             }
             aug_batch_list.append(client_data)
-        
+
         response_all.append(aug_batch_list)
-    
+
     return response_all
 
 
@@ -1492,3 +1799,139 @@ def load_models(file_name, global_model, local_models):
         # 3) restore that client's personalization if you saved it
         if "locals" in state and i in state["locals"]:
             m.load_state_dict(state["locals"][i], strict=False)
+
+
+
+## Federated Learning Gradient Aggregation
+
+def fl_grad_calculate(
+        dataLoader, responseInfo, model, optimizer,
+        tau, rho_p, rho_d, num_antenna, epochRatio=1
+    ):
+    """
+    Calculate gradients for each FL client
+
+    Args:
+        dataLoader: List of graph batches for this client
+        responseInfo: List of rate_pack (DS/PC/UI from other clients)
+        model: Local model
+        optimizer: Local optimizer
+        tau, rho_p, rho_d, num_antenna: Communication parameters
+        epochRatio: Training progress ratio (unused)
+
+    Returns:
+       local_gradients, all_min_rates
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.train()
+
+    local_gradients = {}
+    all_min_rates = []
+
+    # total_loss = 0.0
+    total_min_rate = 0.0
+    total_graphs = 0
+
+    for batch, response in zip(dataLoader, responseInfo):
+        batch = batch.to(device)
+        num_graph = batch.num_graphs
+        optimizer.zero_grad()
+        x_dict, attr_dict, _ = model(batch, isRawData=False)
+        # loss, min_rate = loss_function(
+        loss, min_rate = loss_function_guided(
+            batch, x_dict, attr_dict, response,
+            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
+            # epochRatio=epochRatio,
+        )
+        loss.backward()
+        # optimizer.step()
+
+        # Collect min_rate per sample [B] for server aggregation
+        all_min_rates.append(min_rate.detach().cpu())
+
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad_data = param.grad.detach().clone()
+                if name not in local_gradients:
+                    local_gradients[name] = grad_data
+                else:
+                    local_gradients[name] += grad_data
+
+        # total_loss += loss.item() * num_graph
+        total_min_rate += min_rate.mean().item() * num_graph
+        total_graphs += num_graph
+
+    # FedSoftMin - Normalize gradients by number of batches
+    num_batches = len(dataLoader)
+    for name in local_gradients:
+        local_gradients[name] = local_gradients[name] / num_batches
+
+    # Concatenate all min_rates: [total_samples]
+    all_min_rates = torch.cat(all_min_rates, dim=0)
+
+    return total_min_rate/total_graphs, local_gradients, all_min_rates
+
+def aggregate_and_update(global_model, client_dicts, global_optimizer):
+    """
+    client_dicts: A list of dictionaries returned by clients.
+                  Example: [ {'conv1.weight': tensor, ...}, {'conv1.weight': tensor, ...} ]
+    """
+    
+    # 1. Initialize an empty dictionary for the global gradient
+    # We use the global model's parameter names to ensure we only process relevant keys
+    global_grads = {}
+    
+    num_clients = len(client_dicts)
+
+    # 2. Iterate over the global model's named parameters
+    for name, param in global_model.named_parameters():
+        if not param.requires_grad:
+            continue
+            
+        # Initialize a tensor of zeros with the same shape as the parameter
+        accumulated_grad = torch.zeros_like(param)
+        
+        # Sum this specific parameter's gradient from all clients
+        for client_dict in client_dicts:
+            # Safety check: ensure the client actually sent this parameter
+            if name in client_dict:
+                accumulated_grad += client_dict[name]
+        
+        # Average it
+        global_grads[name] = accumulated_grad / num_clients
+
+    # 3. Apply gradients to the global model
+    global_optimizer.zero_grad()
+    
+    for name, param in global_model.named_parameters():
+        if name in global_grads:
+            # Assign the averaged gradient to the .grad attribute
+            param.grad = global_grads[name].detach()
+
+    # 4. Optimizer Step
+    global_optimizer.step()
+    
+    return global_model
+
+def average_model_buffers(global_model, local_models, selected_clients):
+    """
+    Averages the 'running_mean' and 'running_var' (BatchNorm stats) 
+    from selected local models into the global model.
+    """
+    # 1. Create a template from the global model
+    avg_buffers = {}
+    for name, buf in global_model.named_buffers():
+        avg_buffers[name] = torch.zeros_like(buf)
+
+    # 2. Accumulate buffers from selected clients
+    count = 0
+    for i in selected_clients:
+        count += 1
+        for name, buf in local_models[i].named_buffers():
+            avg_buffers[name] += buf
+
+    # 3. Average and Apply
+    if count > 0:
+        for name, buf in global_model.named_buffers():
+            # Use copy_ to update in-place
+            buf.copy_(avg_buffers[name] / count)

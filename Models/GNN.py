@@ -192,8 +192,7 @@ class APHetNetFL(nn.Module):
     def __init__(self, metadata, dim_dict, out_channels, aug_feat_dim=3, num_layers=0, hid_layers=4, isDecentralized=False):
         super(APHetNetFL, self).__init__()
         src_dim_dict = dim_dict.copy()
-
-        src_dim_dict['GAP'] = 0
+        
 
         self.ue_dim = src_dim_dict['UE']
         self.ue_dim_aug = src_dim_dict['UE'] + out_channels  + aug_feat_dim
@@ -206,33 +205,32 @@ class APHetNetFL(nn.Module):
 
 
         ##
+        src_dim_dict_gap = dim_dict.copy()
+        src_dim_dict_gap['GAP'] = 0
+        src_dim_dict_gap['AP'] = 0
+        src_dim_dict_gap['edge'] = 0
         self.convs_gap = torch.nn.ModuleList()
             
         self.convs_gap.append(APConvLayer(
-            {'UE': out_channels, 'GAP': out_channels}, 
-            self.edge_dim+4,
-            out_channels, src_dim_dict,
-            [('UE', 'up', 'GAP')]
-        ))
-        
-        self.convs_gap.append(APConvLayer(
-            {'UE': out_channels, 'GAP': out_channels},
-            self.edge_dim+4,
-            out_channels, src_dim_dict,
-            [('GAP', 'down', 'UE')]
+            {'GAP': out_channels, 'AP': self.ap_dim }, 
+            out_channels,
+            out_channels, src_dim_dict_gap,
+            [('GAP', 'cross', 'AP')]
         ))
         
         for _ in range(num_layers):
             self.convs_gap.append(APConvLayer(
-                {'UE': out_channels, 'GAP': out_channels}, 
-                out_channels, out_channels, src_dim_dict, 
-                [('UE', 'up', 'GAP'), ('GAP', 'down', 'UE')]
+                {'GAP': out_channels, 'AP': self.ap_dim }, 
+                out_channels,
+                out_channels, src_dim_dict_gap,
+                [('GAP', 'cross', 'AP'), ('AP', 'cross-back', 'GAP')]
             ))
 
         hid = hid_layers # too much is not good - 8 is bad, 4 is currently good
         
         self.ue_encoder_raw = MLP([self.ue_dim, hid, out_channels - self.ue_dim], batch_norm=True, dropout_prob=0.1) 
         self.ue_encoder_aug = MLP([self.ue_dim_aug, hid, out_channels - self.ue_dim], batch_norm=True, dropout_prob=0.1) 
+        self.ap_encoder_raw = MLP([self.ap_dim, hid, out_channels], batch_norm=True, dropout_prob=0.1) 
         self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
         self.power_edge = nn.Sequential(
             *[
@@ -245,7 +243,7 @@ class APHetNetFL(nn.Module):
             
             # # First Layer to update RRU
             layers.append(APConvLayer(
-                {'UE': out_channels, 'AP': self.ap_dim}, 
+                {'UE': out_channels, 'AP': out_channels}, 
                 self.edge_dim,
                 out_channels, src_dim_dict,
                 [('UE', 'up', 'AP')]
@@ -278,6 +276,8 @@ class APHetNetFL(nn.Module):
                 [x_dict['UE'] [:,:self.ue_dim], aug_ue], 
                 dim=1
             )
+            aug_ap = self.ap_encoder_raw(x_dict['AP'] )
+            x_dict['AP'] = aug_ap
             # for conv in self.convs_raw:
             #     x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
         else:
@@ -291,12 +291,12 @@ class APHetNetFL(nn.Module):
 
         for conv in self.convs_aug:
             x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
-        
-        edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
-        edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
-            [edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], 
-            dim=1
-        )
-            
+
+        if not isRawData:
+            edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
+            edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
+                [edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], 
+                dim=1
+            )
 
         return x_dict, edge_attr_dict, edge_index_dict
