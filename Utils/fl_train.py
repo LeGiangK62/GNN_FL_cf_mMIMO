@@ -289,13 +289,25 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
         all_AP_embeddings = [r['AP'] for r in all_response]
         all_edge_embeddings = [r['edge_down'] for r in all_response]
 
+        all_DS = [r['DS'][:,0,:] for r in all_response] # [B, num_client, K]
+        all_PC = [r['PC'][:,0,:,:] for r in all_response] # [B, num_client, K]
+        all_UI = [r['UI'][:,0,:,:] for r in all_response] # [B, num_client, K]
 
         if not all(x.shape == all_client_embeddings[0].shape for x in all_client_embeddings):
             raise RuntimeError(f"Batch {batch_idx}: Mismatch in UE counts between clients. Cannot stack.")
 
         global_ue_context = torch.sum(torch.stack(all_client_embeddings), dim=0)
         for client_id, (_, batch) in enumerate(zip(all_response, all_loader)):
-            
+
+            ## DS, PC, UI
+            other_DS = torch.stack(all_DS[:client_id] + all_DS[client_id+1:], dim=1)
+            other_PC = torch.stack(all_PC[:client_id] + all_PC[client_id+1:], dim=1).sum(dim=2)
+            other_UI = torch.stack(all_UI[:client_id] + all_UI[client_id+1:], dim=1).sum(dim=2)
+
+            aug_DS = other_DS.mean(dim=1).reshape(-1, 1) # sum or mean
+            aug_PC = other_PC.mean(dim=1).reshape(-1, 1) # sum or mean
+            aug_UI = other_UI.mean(dim=1).reshape(-1, 1) # sum or mean
+
             # Rate pack from other APs (DC, PC, UI)
             other_pack = []
             keys_needed = ['DS', 'PC', 'UI']
@@ -319,7 +331,7 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
             num_total_ue, _, edge_feat_dim = other_edge.shape
             num_ue_per_graph = num_total_ue // num_batch
             edge_reshaped = other_edge.reshape(num_batch, num_ue_per_graph, num_GAP, edge_feat_dim)
-            edge_summed = edge_reshaped.sum(dim=1) # sum the power allocation from each AP? 
+            edge_summed = edge_reshaped.mean(dim=1) # sum or mean
             edge_attr_inteference = edge_summed.reshape(-1, feat_dim)
 
             aug_batch['GAP'].x = other_AP.reshape(-1, feat_dim)
@@ -333,6 +345,7 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
                 [
                     aug_batch['UE'].x, # init dim
                     new_ue_features,   # out_channel
+                    aug_DS, aug_PC, aug_UI
                 ],
                 dim=-1
             )

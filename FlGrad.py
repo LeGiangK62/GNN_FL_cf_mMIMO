@@ -272,7 +272,7 @@ if __name__ == '__main__':
         metadata=tt_meta,
         dim_dict=dim_dict,
         out_channels=hidden_channels,
-        aug_feat_dim=0,  # DS, PC, UI, rate_without_me + 3?
+        aug_feat_dim=3,  # DS, PC, UI, rate_without_me + 3?
         num_layers=num_gnn_layers,
         hid_layers=hidden_channels//2,
         isDecentralized=False  # Use same architecture as centralized
@@ -300,7 +300,7 @@ if __name__ == '__main__':
             metadata=tt_meta,
             dim_dict=dim_dict,
             out_channels=hidden_channels,
-            aug_feat_dim=0,  # DS, PC, UI, rate_without_me + 3?
+            aug_feat_dim=3,  # DS, PC, UI, rate_without_me + 3?
             num_layers=num_gnn_layers,
             hid_layers=hidden_channels//2,
             isDecentralized=False

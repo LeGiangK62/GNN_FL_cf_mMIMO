@@ -220,7 +220,7 @@ class APHetNetFL(nn.Module):
         
         for _ in range(num_layers):
             self.convs_gap.append(APConvLayer(
-                {'GAP': out_channels, 'AP': self.ap_dim }, 
+                {'GAP': out_channels, 'AP': out_channels }, 
                 out_channels,
                 out_channels, src_dim_dict_gap,
                 [('GAP', 'cross', 'AP'), ('AP', 'cross-back', 'GAP')]
