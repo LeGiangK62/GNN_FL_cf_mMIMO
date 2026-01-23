@@ -417,11 +417,12 @@ if __name__ == '__main__':
         print(f"Execution Time: {timedelta(seconds=execution_time)}")
 
         plt.figure(figsize=(6,4), dpi=180)
-        plt.plot(fl_all_rate, label='Training Rate', linewidth=2)
-        plt.plot(fl_all_rate_test, label='Testing Rate', linewidth=2)
+        x_axis = [i * eval_round for i in range(len(fl_all_rate))]
+        plt.plot(x_axis, fl_all_rate, label='Training Rate', linewidth=2)
+        plt.plot(x_axis, fl_all_rate_test, label='Testing Rate', linewidth=2)
         plt.axhline(y=np.mean(opt_train_rates[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
         plt.axhline(y=np.mean(opt_train_rates[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
-        plt.xlabel('Epoch', fontsize=12)
+        plt.xlabel('Rounds', fontsize=12)
         plt.ylabel('Rate', fontsize=12)
         plt.title(f'{args.fl_scheme.upper()}  GNN Training Rate Curve - {args.lr}_{args.num_rounds}', fontsize=14)
         plt.grid(True, linestyle='--', alpha=0.6)

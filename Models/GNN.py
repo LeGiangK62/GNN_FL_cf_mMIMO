@@ -200,8 +200,6 @@ class APHetNetFL(nn.Module):
         self.edge_dim = src_dim_dict['edge']
 
 
-        self.convs_raw = self.create_conv_block(out_channels, src_dim_dict, num_layers)
-        self.convs_aug = self.create_conv_block(out_channels, src_dim_dict, num_layers)  
 
 
         ##
@@ -218,14 +216,42 @@ class APHetNetFL(nn.Module):
             [('GAP', 'cross', 'AP')]
         ))
         
-        for _ in range(num_layers):
-            self.convs_gap.append(APConvLayer(
-                {'GAP': out_channels, 'AP': out_channels }, 
-                out_channels,
-                out_channels, src_dim_dict_gap,
-                [('GAP', 'cross', 'AP'), ('AP', 'cross-back', 'GAP')]
-            ))
+        self.convs_gap.append(APConvLayer(
+            {'GAP': out_channels, 'AP': out_channels }, 
+            out_channels,
+            out_channels, src_dim_dict_gap,
+            [('GAP', 'cross', 'AP'), ('AP', 'cross-back', 'GAP')]
+        ))
 
+        ##
+        self.convs_gap_post = torch.nn.ModuleList()
+            
+        self.convs_gap_post.append(APConvLayer(
+            {'GAP': out_channels, 'AP': out_channels }, 
+            out_channels,
+            out_channels, src_dim_dict_gap,
+            [('GAP', 'cross', 'AP')]
+        ))
+        
+        self.convs_gap_post.append(APConvLayer(
+            {'GAP': out_channels, 'AP': out_channels }, 
+            out_channels,
+            out_channels, src_dim_dict_gap,
+            [('GAP', 'cross', 'AP'), ('AP', 'cross-back', 'GAP')]
+        ))
+
+        # self.convs_gap_post.append(APConvLayer(
+        #     {'GAP': out_channels, 'UE': out_channels }, 
+        #     out_channels,
+        #     out_channels, src_dim_dict_gap,
+        #     [('GAP', 'g_down', 'UE'), ('UE', 'g_up', 'GAP')]
+        # ))
+
+        ##
+        # self.convs_pre = self.create_conv_block(out_channels, out_channels, self.edge_dim, out_channels, src_dim_dict, num_layers)  
+        self.convs_pre = self.create_conv_block(out_channels, out_channels, self.edge_dim, out_channels, src_dim_dict, num_layers-1)  
+        self.convs_aug = self.create_conv_block(out_channels, out_channels, out_channels, out_channels, src_dim_dict, num_layers-1)  
+        
         hid = hid_layers # too much is not good - 8 is bad, 4 is currently good
         
         self.ue_encoder_raw = MLP([self.ue_dim, hid, out_channels - self.ue_dim], batch_norm=True, dropout_prob=0.1) 
@@ -238,20 +264,20 @@ class APHetNetFL(nn.Module):
             ]
         )
 
-    def create_conv_block(self, out_channels, src_dim_dict, num_layers):
+    def create_conv_block(self, ue_in, ap_in, edge, out_channels, src_dim_dict, num_layers):
             layers = torch.nn.ModuleList()
             
             # # First Layer to update RRU
             layers.append(APConvLayer(
-                {'UE': out_channels, 'AP': out_channels}, 
-                self.edge_dim,
+                {'UE': ue_in, 'AP': ap_in}, 
+                edge,
                 out_channels, src_dim_dict,
                 [('UE', 'up', 'AP')]
             ))
             
             layers.append(APConvLayer(
-                {'UE': out_channels, 'AP': out_channels},
-                self.edge_dim,
+                {'UE': ue_in, 'AP': out_channels},
+                edge,
                 out_channels, src_dim_dict,
                 [('AP', 'down', 'UE')]
             ))
@@ -278,8 +304,6 @@ class APHetNetFL(nn.Module):
             )
             aug_ap = self.ap_encoder_raw(x_dict['AP'] )
             x_dict['AP'] = aug_ap
-            # for conv in self.convs_raw:
-            #     x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
         else:
             aug_ue = self.ue_encoder_aug(x_dict['UE'] )
             x_dict['UE'] = torch.cat(
@@ -289,10 +313,17 @@ class APHetNetFL(nn.Module):
             for conv in self.convs_gap:
                 x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
 
+        for conv in self.convs_pre:
+            x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
+
         for conv in self.convs_aug:
             x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
 
         if not isRawData:
+            for conv in self.convs_gap_post:
+                x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
+            # for conv in self.convs_aug:
+            #     x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
             edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
             edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
                 [edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], 

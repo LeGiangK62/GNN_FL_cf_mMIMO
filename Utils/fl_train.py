@@ -320,12 +320,16 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
             aug_batch = batch.clone()
             device = aug_batch['UE'].x.device
 
-            # Other AP
+            # GAP 
             other_AP = torch.stack(all_AP_embeddings[:client_id] + all_AP_embeddings[client_id+1:], dim=1)
             num_batch, num_GAP, feat_dim = other_AP.shape
+            aug_batch['GAP'].x = other_AP.reshape(-1, feat_dim)
+            
+            # GAP - AP
             ap_indices = torch.arange(num_batch, device=device).repeat_interleave(num_GAP)
             gap_indices = torch.arange(num_batch * num_GAP, device=device)
             edge_index_inteference = torch.stack([gap_indices, ap_indices], dim=0)
+            edge_index_inteference_back = torch.stack([ap_indices, gap_indices], dim=0)
 
             other_edge = torch.stack(all_edge_embeddings[:client_id] + all_edge_embeddings[client_id+1:], dim=1)
             num_total_ue, _, edge_feat_dim = other_edge.shape
@@ -334,9 +338,33 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
             edge_summed = edge_reshaped.mean(dim=1) # sum or mean
             edge_attr_inteference = edge_summed.reshape(-1, feat_dim)
 
-            aug_batch['GAP'].x = other_AP.reshape(-1, feat_dim)
             aug_batch['GAP', 'cross', 'AP'].edge_index = edge_index_inteference
             aug_batch['GAP', 'cross', 'AP'].edge_attr = edge_attr_inteference
+
+            aug_batch['AP', 'cross-back', 'GAP'].edge_index = edge_index_inteference_back
+            aug_batch['AP', 'cross-back', 'GAP'].edge_attr = edge_attr_inteference
+
+            # # GAP - UE edges
+            # gap_idx_single = torch.arange(num_GAP, device=device).repeat_interleave(num_ue_per_graph)  # [0,0,0,0,0,0, 1,1,1,1,1,1, ...]
+            # ue_idx_single = torch.arange(num_ue_per_graph, device=device).repeat(num_GAP)              # [0,1,2,3,4,5, 0,1,2,3,4,5, ...]
+
+            # num_edges_per_graph = num_GAP * num_ue_per_graph
+            # gap_offsets = torch.arange(num_batch, device=device).repeat_interleave(num_edges_per_graph) * num_GAP
+            # ue_offsets = torch.arange(num_batch, device=device).repeat_interleave(num_edges_per_graph) * num_ue_per_graph
+
+            # gap_indices = gap_idx_single.repeat(num_batch) + gap_offsets
+            # ue_indices = ue_idx_single.repeat(num_batch) + ue_offsets
+
+            # edge_index_g_down = torch.stack([gap_indices, ue_indices], dim=0)  # GAP → UE
+            # edge_index_g_up = torch.stack([ue_indices, gap_indices], dim=0)    # UE → GAP
+
+            # edge_attr_gap_ue = edge_reshaped.permute(0, 2, 1, 3).reshape(-1, edge_feat_dim)
+
+            # aug_batch['GAP', 'g_down', 'UE'].edge_index = edge_index_g_down
+            # aug_batch['GAP', 'g_down', 'UE'].edge_attr = edge_attr_gap_ue
+
+            # aug_batch['UE', 'g_up', 'GAP'].edge_index = edge_index_g_up
+            # aug_batch['UE', 'g_up', 'GAP'].edge_attr = edge_attr_gap_ue
 
             # Global UE context (from other APs)
             new_ue_features = ((global_ue_context - all_client_embeddings[client_id]) / (num_client - 1)).to(device)
