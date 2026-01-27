@@ -11,7 +11,7 @@ import numpy as np
 import scipy.io
 from Utils.data_gen import build_cen_loader, build_decen_loader
 
-from Models.GNN import APHetNet, APHetNetFL2 as APHetNetFL
+from Models.GNN import APHetNet, APHetNetFL
 from Utils.args import parse_args
 from Utils.centralized_train import cen_eval, cen_train, cen_loss_function
 from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
