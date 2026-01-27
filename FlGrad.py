@@ -11,7 +11,7 @@ import numpy as np
 import scipy.io
 from Utils.data_gen import build_cen_loader, build_decen_loader
 
-from Models.GNN import APHetNet, APHetNetFL
+from Models.GNN import APHetNet, APHetNetFL2 as APHetNetFL
 from Utils.args import parse_args
 from Utils.centralized_train import cen_eval, cen_train, cen_loss_function
 from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
@@ -253,26 +253,25 @@ if __name__ == '__main__':
 
     ## Model
     ap_dim = train_data[0][0]['AP'].x.shape[1]
-    ue_dim_original = train_data[0][0]['UE'].x.shape[1]  # Original UE dim (tau)
+    ue_dim = train_data[0][0]['UE'].x.shape[1]  # Original UE dim (tau)
     edge_dim = train_data[0][0]['down'].edge_attr.shape[1]
-
-    # FL model expects augmented UE features: [tau + 3]
-    # where +3 = DS_global + PC_global + UI_global
-    ue_dim_fl = ue_dim_original
 
     tt_meta = [('UE', 'up', 'AP'), ('AP', 'down', 'UE')]
     dim_dict = {
-        'UE': ue_dim_fl,  # Augmented UE dimension
+        'UE': ue_dim,  # Augmented UE dimension
         'AP': ap_dim,
         'edge': edge_dim,
     }
+
+    # FL model expects augmented UE features: [tau + 3]
+    aug_ue_dim = 4
 
     # Initialize the models, optimizers, and schedulers for clients
     global_model = APHetNetFL(
         metadata=tt_meta,
         dim_dict=dim_dict,
         out_channels=hidden_channels,
-        aug_feat_dim=3,  # DS, PC, UI, rate_without_me + 3?
+        aug_feat_dim=aug_ue_dim,  # DS, PC, UI, rate_without_me + 3?
         num_layers=num_gnn_layers,
         hid_layers=hidden_channels//2,
         isDecentralized=False  # Use same architecture as centralized
@@ -300,7 +299,7 @@ if __name__ == '__main__':
             metadata=tt_meta,
             dim_dict=dim_dict,
             out_channels=hidden_channels,
-            aug_feat_dim=3,  # DS, PC, UI, rate_without_me + 3?
+            aug_feat_dim=aug_ue_dim,  # DS, PC, UI, rate_without_me + 3?
             num_layers=num_gnn_layers,
             hid_layers=hidden_channels//2,
             isDecentralized=False
@@ -495,4 +494,13 @@ if __name__ == '__main__':
         eval_path = EVAL_DIR + f'/{figure_name}.png' 
         plt.savefig(eval_path, dpi=300, bbox_inches='tight')
         print(f'Save Evaluation figure to {eval_path}.')
+
+
+    # print('Current best: bottleneck_indicator, contribution_ratio,  interference_share,  global_sinr')
+    # print("Old: GAP -> UE -> GAP")
+    # print("New: UE -> GAP -> UE")
+    print("Pre UE -> Mix  -> GAP -> Mix")
+    print("1 layer fixed")
+
+    # old best: DS,PC, UI in UE, no GAP, GAP-AP enhanced?
     

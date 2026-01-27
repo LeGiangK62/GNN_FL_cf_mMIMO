@@ -81,3 +81,7 @@ remove the sigmoid in the power MLP en 3 layers x 64
 1e-2 > 5e-1 => plateue
 
 bat_norm using is better
+
+4 GNN layers are too much
+
+num_gnn_layers 3 is current optimal 

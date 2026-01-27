@@ -191,6 +191,9 @@ class APHetNet(nn.Module):
 class APHetNetFL(nn.Module):
     def __init__(self, metadata, dim_dict, out_channels, aug_feat_dim=3, num_layers=0, hid_layers=4, isDecentralized=False):
         super(APHetNetFL, self).__init__()
+
+        GAP_init_dim = out_channels # + 3
+        GAP_edge_init_dim = out_channels
         src_dim_dict = dim_dict.copy()
         
 
@@ -205,15 +208,22 @@ class APHetNetFL(nn.Module):
         ##
         src_dim_dict_gap = dim_dict.copy()
         src_dim_dict_gap['GAP'] = 0
-        src_dim_dict_gap['AP'] = 0
+        src_dim_dict_gap['AP'] = src_dim_dict['AP']
         src_dim_dict_gap['edge'] = 0
         self.convs_gap = torch.nn.ModuleList()
             
         self.convs_gap.append(APConvLayer(
-            {'GAP': out_channels, 'AP': self.ap_dim }, 
-            out_channels,
+            {'GAP': GAP_init_dim, 'AP': self.ap_dim }, 
+            GAP_edge_init_dim,
             out_channels, src_dim_dict_gap,
             [('GAP', 'cross', 'AP')]
+        ))
+
+        self.convs_gap.append(APConvLayer(
+            {'GAP': GAP_init_dim, 'AP': out_channels }, 
+            GAP_edge_init_dim,
+            out_channels, src_dim_dict_gap,
+            [('AP', 'cross-back', 'GAP')]
         ))
         
         self.convs_gap.append(APConvLayer(
@@ -222,6 +232,13 @@ class APHetNetFL(nn.Module):
             out_channels, src_dim_dict_gap,
             [('GAP', 'cross', 'AP'), ('AP', 'cross-back', 'GAP')]
         ))
+
+        # self.convs_gap.append(APConvLayer(
+        #     {'GAP': out_channels, 'UE': out_channels }, 
+        #     out_channels,
+        #     out_channels, src_dim_dict_gap,
+        #     [('GAP', 'g_down', 'UE'), ('UE', 'g_up', 'GAP')]
+        # ))
 
         ##
         self.convs_gap_post = torch.nn.ModuleList()
@@ -240,12 +257,6 @@ class APHetNetFL(nn.Module):
             [('GAP', 'cross', 'AP'), ('AP', 'cross-back', 'GAP')]
         ))
 
-        # self.convs_gap_post.append(APConvLayer(
-        #     {'GAP': out_channels, 'UE': out_channels }, 
-        #     out_channels,
-        #     out_channels, src_dim_dict_gap,
-        #     [('GAP', 'g_down', 'UE'), ('UE', 'g_up', 'GAP')]
-        # ))
 
         ##
         # self.convs_pre = self.create_conv_block(out_channels, out_channels, self.edge_dim, out_channels, src_dim_dict, num_layers)  

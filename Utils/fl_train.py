@@ -295,18 +295,34 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
 
         if not all(x.shape == all_client_embeddings[0].shape for x in all_client_embeddings):
             raise RuntimeError(f"Batch {batch_idx}: Mismatch in UE counts between clients. Cannot stack.")
+        
+        ## Calculate rate
+        all_DS_stack = torch.stack(all_DS, dim=1)
+        all_PC_stack = torch.stack(all_PC, dim=1)
+        all_UI_stack = torch.stack(all_UI, dim=1)
+        global_rate = rate_from_component(all_DS_stack, all_PC_stack, all_UI_stack, numAntenna=num_antenna)
+        # min_rate_per_sample, bottleneck_ue_idx = torch.min(global_rate, dim=1)
+        temperature = 0.001
+        bottleneck_indicator = F.softmax(-global_rate / temperature, dim=1)
+        bottleneck_indicator = bottleneck_indicator.reshape(-1,1)
+
+        rank_indices = torch.argsort(torch.argsort(global_rate, dim=1), dim=1)
+        normalized_rank = rank_indices.float() / (global_rate.shape[1] - 1)
+        normalized_rank = normalized_rank.reshape(-1, 1)
+
+        # Total DS across all APs for contribution ratio
+        total_DS = all_DS_stack.sum(dim=1)  # [B, K]
+        total_Interf = (all_PC_stack.sum(dim=2) + all_UI_stack.sum(dim=2)).sum(dim=1) # [B, K]
 
         global_ue_context = torch.sum(torch.stack(all_client_embeddings), dim=0)
         for client_id, (_, batch) in enumerate(zip(all_response, all_loader)):
+
+            other_AP_indices = list(range(client_id)) + list(range(client_id + 1, num_client))
 
             ## DS, PC, UI
             other_DS = torch.stack(all_DS[:client_id] + all_DS[client_id+1:], dim=1)
             other_PC = torch.stack(all_PC[:client_id] + all_PC[client_id+1:], dim=1).sum(dim=2)
             other_UI = torch.stack(all_UI[:client_id] + all_UI[client_id+1:], dim=1).sum(dim=2)
-
-            aug_DS = other_DS.mean(dim=1).reshape(-1, 1) # sum or mean
-            aug_PC = other_PC.mean(dim=1).reshape(-1, 1) # sum or mean
-            aug_UI = other_UI.mean(dim=1).reshape(-1, 1) # sum or mean
 
             # Rate pack from other APs (DC, PC, UI)
             other_pack = []
@@ -323,7 +339,27 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
             # GAP 
             other_AP = torch.stack(all_AP_embeddings[:client_id] + all_AP_embeddings[client_id+1:], dim=1)
             num_batch, num_GAP, feat_dim = other_AP.shape
-            aug_batch['GAP'].x = other_AP.reshape(-1, feat_dim)
+
+            # # Enhance the GAP node feature
+            # gap_total_DS = other_DS.sum(dim=2) # [B, num_GAP]
+
+            # # Per-GAP total interference: [B, num_GAP]  
+            # gap_total_interf = (other_PC + other_UI).sum(dim=2)   # [B, num_GAP]
+
+            # # Per-GAP load (signal-to-interference ratio)
+            # gap_load = gap_total_DS / (gap_total_interf + 1e-6)  # [B, num_GAP]
+
+            # # Concatenate to GAP features
+            # gap_features = torch.cat([
+            #     other_AP.reshape(num_batch, num_GAP, feat_dim),  # [B, num_GAP, feat_dim]
+            #     # gap_total_DS.unsqueeze(-1),    # [B, num_GAP, 1]
+            #     # gap_total_interf.unsqueeze(-1), # [B, num_GAP, 1]
+            #     # gap_load.unsqueeze(-1)          # [B, num_GAP, 1]
+            # ], dim=-1).reshape(-1, feat_dim + 1)
+
+            gap_features = other_AP.reshape(-1, feat_dim)
+
+            aug_batch['GAP'].x = gap_features.to(device)
             
             # GAP - AP
             ap_indices = torch.arange(num_batch, device=device).repeat_interleave(num_GAP)
@@ -338,42 +374,62 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
             edge_summed = edge_reshaped.mean(dim=1) # sum or mean
             edge_attr_inteference = edge_summed.reshape(-1, feat_dim)
 
+            ## Enhace the edge
+
+            # gap_DS = other_DS.mean(dim=2, keepdim=True)  # [B, num_GAP, 1]
+            # gap_interference = (other_PC + other_UI).mean(dim=2, keepdim=True)  # [B, num_GAP, 1]
+
+            # Concatenate to edge attr
+            # edge_attr_inteference = torch.cat([
+            #     edge_summed,  # [B, num_GAP, feat_dim]
+            #     gap_DS,       # [B, num_GAP, 1]
+            #     gap_interference  # [B, num_GAP, 1]
+            # ], dim=-1).reshape(-1, feat_dim + 2)
+            edge_attr_inteference = edge_summed.reshape(-1, feat_dim)
+
             aug_batch['GAP', 'cross', 'AP'].edge_index = edge_index_inteference
             aug_batch['GAP', 'cross', 'AP'].edge_attr = edge_attr_inteference
 
             aug_batch['AP', 'cross-back', 'GAP'].edge_index = edge_index_inteference_back
             aug_batch['AP', 'cross-back', 'GAP'].edge_attr = edge_attr_inteference
 
-            # # GAP - UE edges
-            # gap_idx_single = torch.arange(num_GAP, device=device).repeat_interleave(num_ue_per_graph)  # [0,0,0,0,0,0, 1,1,1,1,1,1, ...]
-            # ue_idx_single = torch.arange(num_ue_per_graph, device=device).repeat(num_GAP)              # [0,1,2,3,4,5, 0,1,2,3,4,5, ...]
-
-            # num_edges_per_graph = num_GAP * num_ue_per_graph
-            # gap_offsets = torch.arange(num_batch, device=device).repeat_interleave(num_edges_per_graph) * num_GAP
-            # ue_offsets = torch.arange(num_batch, device=device).repeat_interleave(num_edges_per_graph) * num_ue_per_graph
-
-            # gap_indices = gap_idx_single.repeat(num_batch) + gap_offsets
-            # ue_indices = ue_idx_single.repeat(num_batch) + ue_offsets
-
-            # edge_index_g_down = torch.stack([gap_indices, ue_indices], dim=0)  # GAP → UE
-            # edge_index_g_up = torch.stack([ue_indices, gap_indices], dim=0)    # UE → GAP
-
-            # edge_attr_gap_ue = edge_reshaped.permute(0, 2, 1, 3).reshape(-1, edge_feat_dim)
-
-            # aug_batch['GAP', 'g_down', 'UE'].edge_index = edge_index_g_down
-            # aug_batch['GAP', 'g_down', 'UE'].edge_attr = edge_attr_gap_ue
-
-            # aug_batch['UE', 'g_up', 'GAP'].edge_index = edge_index_g_up
-            # aug_batch['UE', 'g_up', 'GAP'].edge_attr = edge_attr_gap_ue
-
             # Global UE context (from other APs)
             new_ue_features = ((global_ue_context - all_client_embeddings[client_id]) / (num_client - 1)).to(device)
+
+            # Contribution ratio: how much this AP contributes to each UE's signal
+            local_DS = all_DS[client_id]  # [B, K]
+            contribution_ratio = (local_DS / (total_DS + 1e-6)).reshape(-1, 1)  # [B*K, 1]
+            # log_rate_context = torch.log10(min_rate_per_sample + 1e-9).reshape(-1, 1).repeat(num_ue_per_graph, 1)
+
+            # ap_conditioned_bottleneck = bottleneck_indicator * contribution_ratio
+
+            # Context A: Global Embedding
+            new_ue_features = ((global_ue_context - all_client_embeddings[client_id]) / (num_client - 1)).to(device)
+            
+            # Context B: Signal Contribution (My Signal / Total Signal)
+            local_DS = all_DS[client_id]
+            contribution_ratio = (local_DS / (total_DS + 1e-9)).reshape(-1, 1)
+            
+            # Context C: Interference Share (My Interference / Total Interference)
+            # **CRITICAL NEW FEATURE**
+            local_interf = (all_PC[client_id] + all_UI[client_id]).sum(dim=2)
+            interference_share = (local_interf / (total_Interf + 1e-9)).reshape(-1, 1)
+
+            # Context D: Global Quality (Log SINR)
+            # **CRITICAL NEW FEATURE**
+            # Tells the UE if it is in a "high power" or "low power" regime globally
+            global_sinr = (2 ** global_rate - 1).reshape(-1, 1)
+
 
             aug_batch['UE'].x = torch.cat(
                 [
                     aug_batch['UE'].x, # init dim
                     new_ue_features,   # out_channel
-                    aug_DS, aug_PC, aug_UI
+                    bottleneck_indicator,    # [Focus: Soft attention]
+                    # normalized_rank,         # [Focus: Hard priority] <--- NEW
+                    contribution_ratio,      # [Action: How much I help]
+                    interference_share,      # [Action: How much I hurt] <--- NEW
+                    global_sinr              # [State: How good is the user globally] <--- NEW
                 ],
                 dim=-1
             )
