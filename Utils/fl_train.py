@@ -18,7 +18,7 @@ from Utils.comm import (
 
 
 ###################################################################################
-def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p, rho_d, num_antenna, isTrain=True):
+def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p, rho_d, num_antenna, round_ratio=0, isTrain=True):
     """
     Compute loss for FL training.
 
@@ -67,17 +67,30 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, tau, rho_p,
     rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)  # [B, K]
     min_rate_detach, _ = torch.min(rate.detach(), dim=1)
     
-    # min_rate, _ = torch.min(rate, dim=1)
-    temperature = 2.1
+
+    # Soft min - better, with temp = 2.1 
+    min_rate, _ = torch.min(rate, dim=1)
+    temperature = 2
+    # temperature = max(0.1, 2 * (1 - round_ratio))
     min_rate = -torch.logsumexp(-rate / temperature, dim=1) * temperature
     loss = -min_rate.mean()
+
+
+
+    # Hard min + soft min
+    # hard_min, _ = torch.min(rate, dim=1)
+    # temperature = 2.0
+    # soft_min = -torch.logsumexp(-rate / temperature, dim=1) * temperature
+
+    # alpha = min(0.25, 0.5 * round_ratio) # small weight on hard min
+    # loss = -((1 - alpha) * soft_min + alpha * hard_min).mean()
 
     return loss, min_rate_detach
 
 
 def fl_train(
         dataLoader, responseInfo, model, optimizer,
-        tau, rho_p, rho_d, num_antenna
+        tau, rho_p, rho_d, num_antenna, round_ratio=0
 ):
     """
     Train a local FL model for one epoch.
@@ -108,6 +121,7 @@ def fl_train(
             batch, x_dict, attr_dict, response,
             tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
             # epochRatio=epochRatio,
+            round_ratio=round_ratio
         )
         loss.backward()
         optimizer.step()
@@ -278,8 +292,180 @@ def server_return(dataLoader, globalInformation, num_antenna=1):
         response_all.append(aug_batch_list)
     return response_all
 
-
 def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
+    num_client = len(globalInformation)
+    response_all = []
+
+    for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*dataLoader), zip(*globalInformation))):
+        aug_batch_list = []
+        all_client_embeddings = [r['UE'] for r in all_response]
+        all_AP_embeddings = [r['AP'] for r in all_response]
+        all_edge_embeddings = [r['edge_down'] for r in all_response]
+
+        all_DS = [r['DS'][:,0,:] for r in all_response] # [B, num_client, K]
+        all_PC = [r['PC'][:,0,:,:] for r in all_response] # [B, num_client, K]
+        all_UI = [r['UI'][:,0,:,:] for r in all_response] # [B, num_client, K]
+
+        if not all(x.shape == all_client_embeddings[0].shape for x in all_client_embeddings):
+            raise RuntimeError(f"Batch {batch_idx}: Mismatch in UE counts between clients. Cannot stack.")
+        
+        ## Calculate rate
+        all_DS_stack = torch.stack(all_DS, dim=1)
+        all_PC_stack = torch.stack(all_PC, dim=1)
+        all_UI_stack = torch.stack(all_UI, dim=1)
+        global_rate = rate_from_component(all_DS_stack, all_PC_stack, all_UI_stack, numAntenna=num_antenna)
+        # min_rate_per_sample, bottleneck_ue_idx = torch.min(global_rate, dim=1)
+        temperature = 0.001
+        bottleneck_indicator = F.softmax(-global_rate / temperature, dim=1)
+        bottleneck_indicator = bottleneck_indicator.reshape(-1,1)
+
+        rank_indices = torch.argsort(torch.argsort(global_rate, dim=1), dim=1)
+        normalized_rank = rank_indices.float() / (global_rate.shape[1] - 1)
+        normalized_rank = normalized_rank.reshape(-1, 1)
+
+        # Total DS across all APs for contribution ratio
+        total_DS = all_DS_stack.sum(dim=1)  # [B, K]
+        total_Interf = (all_PC_stack.sum(dim=2) + all_UI_stack.sum(dim=2)).sum(dim=1) # [B, K]
+
+        global_ue_context = torch.sum(torch.stack(all_client_embeddings), dim=0)
+        for client_id, (_, batch) in enumerate(zip(all_response, all_loader)):
+
+            other_AP_indices = list(range(client_id)) + list(range(client_id + 1, num_client))
+
+            ## DS, PC, UI
+            other_DS = torch.stack(all_DS[:client_id] + all_DS[client_id+1:], dim=1)
+            other_PC = torch.stack(all_PC[:client_id] + all_PC[client_id+1:], dim=1).sum(dim=2)
+            other_UI = torch.stack(all_UI[:client_id] + all_UI[client_id+1:], dim=1).sum(dim=2)
+
+            # Rate pack from other APs (DC, PC, UI)
+            other_pack = []
+            keys_needed = ['DS', 'PC', 'UI']
+            for j in range(num_client):
+                if j != client_id:
+                    full_data = all_response[j]
+                    filtered_data = {k: full_data[k] for k in keys_needed}
+                    other_pack.append(filtered_data)
+
+            aug_batch = batch.clone()
+            device = aug_batch['UE'].x.device
+
+            ########### Start
+            # GAP 
+            other_AP = torch.stack(all_AP_embeddings[:client_id] + all_AP_embeddings[client_id+1:], dim=1)
+            num_batch, num_GAP, feat_dim = other_AP.shape
+
+            # # Enhance the GAP node feature
+            # gap_total_DS = other_DS.sum(dim=2) # [B, num_GAP]
+
+            # # Per-GAP total interference: [B, num_GAP]  
+            # gap_total_interf = (other_PC + other_UI).sum(dim=2)   # [B, num_GAP]
+
+            # # Per-GAP load (signal-to-interference ratio)
+            # gap_load = gap_total_DS / (gap_total_interf + 1e-6)  # [B, num_GAP]
+
+            # # Concatenate to GAP features
+            # gap_features = torch.cat([
+            #     other_AP.reshape(num_batch, num_GAP, feat_dim),  # [B, num_GAP, feat_dim]
+            #     # gap_total_DS.unsqueeze(-1),    # [B, num_GAP, 1]
+            #     # gap_total_interf.unsqueeze(-1), # [B, num_GAP, 1]
+            #     # gap_load.unsqueeze(-1)          # [B, num_GAP, 1]
+            # ], dim=-1).reshape(-1, feat_dim + 1)
+
+            gap_features = other_AP.reshape(-1, feat_dim)
+
+            aug_batch['GAP'].x = gap_features.to(device)
+
+            # GAP - AP
+            ap_indices = torch.arange(num_batch, device=device).repeat_interleave(num_GAP)
+            gap_indices = torch.arange(num_batch * num_GAP, device=device)
+            edge_index_inteference = torch.stack([gap_indices, ap_indices], dim=0)
+            edge_index_inteference_back = torch.stack([ap_indices, gap_indices], dim=0)
+
+            other_edge = torch.stack(all_edge_embeddings[:client_id] + all_edge_embeddings[client_id+1:], dim=1)
+            num_total_ue, _, edge_feat_dim = other_edge.shape
+            num_ue_per_graph = num_total_ue // num_batch
+            edge_reshaped = other_edge.reshape(num_batch, num_ue_per_graph, num_GAP, edge_feat_dim)
+            # edge_summed = edge_reshaped.mean(dim=1) # sum or mean
+            # edge_attr_inteference = edge_summed.reshape(-1, feat_dim)
+
+            edge_mean = edge_reshaped.mean(dim=1)
+            edge_max = edge_reshaped.max(dim=1)[0]
+            edge_std = edge_reshaped.std(dim=1)
+
+            edge_attr_inteference = torch.cat([edge_mean, edge_max], dim=-1).reshape(-1, edge_feat_dim*2)
+            # edge_attr_inteference = edge_mean.reshape(-1, edge_feat_dim)
+            # edge_attr_inteference_cross = edge_max.reshape(-1, edge_feat_dim)
+            ## Enhace the edge
+
+            # gap_DS = other_DS.mean(dim=2, keepdim=True)  # [B, num_GAP, 1]
+            # gap_interference = (other_PC + other_UI).mean(dim=2, keepdim=True)  # [B, num_GAP, 1]
+
+            # Concatenate to edge attr
+            # edge_attr_inteference = torch.cat([
+            #     edge_summed,  # [B, num_GAP, feat_dim]
+            #     gap_DS,       # [B, num_GAP, 1]
+            #     gap_interference  # [B, num_GAP, 1]
+            # ], dim=-1).reshape(-1, feat_dim + 2)
+            # edge_attr_inteference = edge_summed.reshape(-1, feat_dim)
+
+            aug_batch['GAP', 'cross', 'AP'].edge_index = edge_index_inteference
+            aug_batch['GAP', 'cross', 'AP'].edge_attr = edge_attr_inteference
+
+            aug_batch['AP', 'cross-back', 'GAP'].edge_index = edge_index_inteference_back
+            aug_batch['AP', 'cross-back', 'GAP'].edge_attr = edge_attr_inteference
+            ########### End
+
+            # Global UE context (from other APs)
+            new_ue_features = ((global_ue_context - all_client_embeddings[client_id]) / (num_client - 1)).to(device)
+
+            # Contribution ratio: how much this AP contributes to each UE's signal
+            local_DS = all_DS[client_id]  # [B, K]
+            contribution_ratio = (local_DS / (total_DS + 1e-6)).reshape(-1, 1)  # [B*K, 1]
+            # log_rate_context = torch.log10(min_rate_per_sample + 1e-9).reshape(-1, 1).repeat(num_ue_per_graph, 1)
+
+            # ap_conditioned_bottleneck = bottleneck_indicator * contribution_ratio
+
+            # Context A: Global Embedding
+            new_ue_features = ((global_ue_context - all_client_embeddings[client_id]) / (num_client - 1)).to(device)
+            
+            # Context B: Signal Contribution (My Signal / Total Signal)
+            local_DS = all_DS[client_id]
+            contribution_ratio = (local_DS / (total_DS + 1e-9)).reshape(-1, 1)
+            
+            # Context C: Interference Share (My Interference / Total Interference)
+            # **CRITICAL NEW FEATURE**
+            local_interf = (all_PC[client_id] + all_UI[client_id]).sum(dim=2)
+            interference_share = (local_interf / (total_Interf + 1e-9)).reshape(-1, 1)
+
+            # Context D: Global Quality (Log SINR)
+            # **CRITICAL NEW FEATURE**
+            # Tells the UE if it is in a "high power" or "low power" regime globally
+            global_sinr = (2 ** global_rate - 1).reshape(-1, 1)
+
+
+            aug_batch['UE'].x = torch.cat(
+                [
+                    aug_batch['UE'].x, # init dim
+                    new_ue_features,   # out_channel
+                    bottleneck_indicator,    # [Focus: Soft attention]
+                    # normalized_rank,         # [Focus: Hard priority] <--- NEW
+                    contribution_ratio,      # [Action: How much I help]
+                    interference_share,      # [Action: How much I hurt] <--- NEW
+                    global_sinr              # [State: How good is the user globally] <--- NEW
+                ],
+                dim=-1
+            )
+
+            client_data = {
+                'loader': aug_batch,
+                'rate_pack': other_pack
+            }
+            aug_batch_list.append(client_data)
+        response_all.append(aug_batch_list)
+    return response_all
+
+
+def server_return_GAP_curentBest(dataLoader, globalInformation, num_antenna=1):
     num_client = len(globalInformation)
     response_all = []
 

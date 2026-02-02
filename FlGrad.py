@@ -183,71 +183,6 @@ if __name__ == '__main__':
     )
     
     
-    ## Centralized Training
-    if cen_pretrain is not None:
-        model_filename = f'{MODEL_DIR}/{cen_pretrain}.pth'
-        cen_model.load_state_dict(torch.load(model_filename))
-    else:
-        start_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-        print(f"\n ===={start_time}==== Training Centralized GNN ... ")
-        start_time = time.time()
-        all_rate = []
-        all_rate_test = []
-        eval_epochs_cen = num_epochs_cen//10 if num_epochs_cen//10 else 1
-        print(f'Training Centralized GNN for benchmark...')
-        print(f'Optimal rate: train {np.mean(opt_train_rates[train_idx])}, test {np.mean(opt_train_rates[test_idx])}')
-        for epoch in range(num_epochs_cen):
-            cen_model.train()
-            train_loss = cen_train(
-                epoch/(2*num_epochs_cen//3),
-                train_loader_cen, cen_model, cen_optimizer,
-                tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
-            )
-            
-            cen_model.eval()
-            with torch.no_grad():
-                train_eval = cen_eval(
-                    train_loader_cen, cen_model,
-                    tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
-                )   
-                test_eval = cen_eval(
-                    test_loader_cen, cen_model,
-                    tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
-                )  
-            all_rate.append(train_eval)    
-            all_rate_test.append(test_eval)    
-            cen_scheduler.step()
-            if epoch%eval_epochs_cen==0:
-                print(
-                    f"Epoch {epoch+1:03d}/{num_epochs_cen} | "
-                    f"Train Loss: {train_loss:.4f} | "
-                    f"Train Rate: {train_eval:.4f} | "
-                    f"Test Rate: {test_eval:.4f} "
-                )
-        end_time = time.time()
-        execution_time = end_time - start_time
-        print(f"Execution Time: {timedelta(seconds=execution_time)}")
-        
-        ## Centralized Training Results
-
-        plt.figure(figsize=(6,4), dpi=180)
-        plt.plot(all_rate, label='Training Rate', linewidth=2)
-        plt.plot(all_rate_test, label='Testing Rate', linewidth=2)
-        plt.axhline(y=np.mean(opt_train_rates[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
-        plt.axhline(y=np.mean(opt_train_rates[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
-        plt.xlabel('Epoch', fontsize=12)
-        plt.ylabel('Rate', fontsize=12)
-        plt.title('Centralized GNN Training Rate Curve', fontsize=14)
-        plt.grid(True, linestyle='--', alpha=0.6)
-        plt.legend()
-        plt.tight_layout()
-        figure_name = f'{timestamp}_cen'
-        save_path = TRAIN_DIR + f'{figure_name}.png' 
-        plt.savefig(save_path, dpi=300)  
-        
-        model_filename = f'{MODEL_DIR}/{timestamp}_cen.pth'
-        torch.save(cen_model.state_dict(), model_filename)
-        print(f'Save centralized GNN to {model_filename}.')
     
     # FL-GNN
 
@@ -366,6 +301,7 @@ if __name__ == '__main__':
                         model, opt,
                         tau=tau, rho_p=rho_p, rho_d=rho_d,
                         num_antenna=num_antenna,
+                        round_ratio=round/num_rounds
                     )
                 #     client_loss_sum += train_loss
                 #     client_rate_sum += train_min
@@ -439,6 +375,74 @@ if __name__ == '__main__':
         global_model.load_state_dict(torch.load(fl_model_filename))
 
 
+    
+    ## Centralized Training
+    if cen_pretrain is not None:
+        model_filename = f'{MODEL_DIR}/{cen_pretrain}.pth'
+        cen_model.load_state_dict(torch.load(model_filename))
+    else:
+        start_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+        print(f"\n ===={start_time}==== Training Centralized GNN ... ")
+        start_time = time.time()
+        all_rate = []
+        all_rate_test = []
+        eval_epochs_cen = num_epochs_cen//10 if num_epochs_cen//10 else 1
+        print(f'Training Centralized GNN for benchmark...')
+        print(f'Optimal rate: train {np.mean(opt_train_rates[train_idx])}, test {np.mean(opt_train_rates[test_idx])}')
+        for epoch in range(num_epochs_cen):
+            cen_model.train()
+            train_loss = cen_train(
+                epoch/(2*num_epochs_cen//3),
+                train_loader_cen, cen_model, cen_optimizer,
+                tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+            )
+            
+            cen_model.eval()
+            with torch.no_grad():
+                train_eval = cen_eval(
+                    train_loader_cen, cen_model,
+                    tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+                )   
+                test_eval = cen_eval(
+                    test_loader_cen, cen_model,
+                    tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+                )  
+            all_rate.append(train_eval)    
+            all_rate_test.append(test_eval)    
+            cen_scheduler.step()
+            if epoch%eval_epochs_cen==0:
+                print(
+                    f"Epoch {epoch+1:03d}/{num_epochs_cen} | "
+                    f"Train Loss: {train_loss:.4f} | "
+                    f"Train Rate: {train_eval:.4f} | "
+                    f"Test Rate: {test_eval:.4f} "
+                )
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"Execution Time: {timedelta(seconds=execution_time)}")
+        
+        ## Centralized Training Results
+
+        plt.figure(figsize=(6,4), dpi=180)
+        plt.plot(all_rate, label='Training Rate', linewidth=2)
+        plt.plot(all_rate_test, label='Testing Rate', linewidth=2)
+        plt.axhline(y=np.mean(opt_train_rates[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
+        plt.axhline(y=np.mean(opt_train_rates[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
+        plt.xlabel('Epoch', fontsize=12)
+        plt.ylabel('Rate', fontsize=12)
+        plt.title('Centralized GNN Training Rate Curve', fontsize=14)
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.legend()
+        plt.tight_layout()
+        figure_name = f'{timestamp}_cen'
+        save_path = TRAIN_DIR + f'{figure_name}.png' 
+        plt.savefig(save_path, dpi=300)  
+        
+        model_filename = f'{MODEL_DIR}/{timestamp}_cen.pth'
+        torch.save(cen_model.state_dict(), model_filename)
+        print(f'Save centralized GNN to {model_filename}.')
+
+
     # Evaluation - CDF
     if args.eval_plot:
         print(f'Evaluation' + '='*20)
@@ -499,8 +503,7 @@ if __name__ == '__main__':
     # print('Current best: bottleneck_indicator, contribution_ratio,  interference_share,  global_sinr')
     # print("Old: GAP -> UE -> GAP")
     # print("New: UE -> GAP -> UE")
-    print("Pre UE -> Mix  -> GAP -> Mix")
-    print("1 layer fixed")
+    print("temp 2.0 + fedAdam")
 
     # old best: DS,PC, UI in UE, no GAP, GAP-AP enhanced?
     
