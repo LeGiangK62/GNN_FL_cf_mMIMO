@@ -17,7 +17,7 @@ from Utils.args import parse_args
 from Utils.centralized_train import cen_eval, cen_train, cen_loss_function
 # from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
 
-from Utils.fl_train import fl_train, get_global_info, fl_eval, server_return_GAP, get_global_info_2nd
+from Utils.fl_train import fl_train, get_global_info, fl_eval_no_GAP, server_return
 from Utils.fl_train import FedAvg, FedProx
 
 
@@ -203,7 +203,7 @@ if __name__ == '__main__':
     }
 
     # FL model expects augmented UE features: [tau + 3]
-    aug_ue_dim = 4
+    aug_ue_dim = 0
 
     # Initialize the models, optimizers, and schedulers for clients
     global_model = APHetNetFL(
@@ -284,15 +284,7 @@ if __name__ == '__main__':
                 num_antenna=num_antenna,
             )            
             # response_from_server = server_return(train_loader, send_to_server, num_antenna=num_antenna)
-            response_from_server = server_return_GAP(train_loader, send_to_server, num_antenna=num_antenna)
-
-            for _ in range(comm_rounds):
-                send_to_server = get_global_info_2nd(
-                    response_from_server, local_models,
-                    tau=tau, rho_p=rho_p, rho_d=rho_d,
-                    num_antenna=num_antenna
-                )  
-                response_from_server = server_return_GAP(train_loader, send_to_server, num_antenna=num_antenna)
+            response_from_server = server_return(train_loader, send_to_server, num_antenna=num_antenna)
 
             local_gradients = []
             local_rates = []
@@ -303,7 +295,7 @@ if __name__ == '__main__':
             for client_idx, (model, opt, client_data_tuple) in enumerate(zip(local_models, optimizers, zip(*response_from_server))):
                 batches = [item['loader'] for item in client_data_tuple]
                 batch_rate = [item['rate_pack'] for item in client_data_tuple]
-                global_rate = [item['global_rate'] for item in client_data_tuple]
+                global_rate = [item['global_rate'] for item in client_data_tuple] # Not úse 
 
                 if client_idx in selected_clients:
                     for _ in range(num_epochs):
@@ -326,13 +318,13 @@ if __name__ == '__main__':
 
             if round % eval_round == 0:
                 ## Evaluate on the client local data (both train and test)
-                total_train_rate = fl_eval(
+                total_train_rate = fl_eval_no_GAP(
                     train_loader, local_models, comm_rounds,
                     tau, rho_p, rho_d, num_antenna
                 )
                 total_train_rate = torch.mean(total_train_rate).cpu().detach()
 
-                total_eval_rate = fl_eval(
+                total_eval_rate = fl_eval_no_GAP(
                     test_loader, local_models, comm_rounds,
                     tau, rho_p, rho_d, num_antenna
                 )
@@ -466,7 +458,7 @@ if __name__ == '__main__':
             local_model.eval()
 
 
-        fl_gnn_rates = fl_eval(
+        fl_gnn_rates = fl_eval_no_GAP(
             eval_loader, local_models, comm_rounds,
             tau, rho_p, rho_d, num_antenna
         )
@@ -506,9 +498,7 @@ if __name__ == '__main__':
     # print('Current best: bottleneck_indicator, contribution_ratio,  interference_share,  global_sinr')
     # print("Old: GAP -> UE -> GAP")
     # print("New: UE -> GAP -> UE")
-    # print(" local bottleneck in loss ")
-    print('Temp 1.5')
-    # Todo: Try GAP-UE link (parital)
+    print("ue_encoder_aug in both raw and aug + top L=M//2 GAP")
 
     # old best: DS,PC, UI in UE, no GAP, GAP-AP enhanced?
     

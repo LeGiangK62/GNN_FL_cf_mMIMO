@@ -350,7 +350,7 @@ class APHetNetFL(nn.Module):
     def __init__(self, metadata, dim_dict, out_channels, aug_feat_dim=3, num_layers=0, hid_layers=4, isDecentralized=False):
         super(APHetNetFL, self).__init__()
 
-        GAP_init_dim = out_channels # + 3
+        GAP_init_dim = out_channels + 0# + 3
         GAP_edge_init_dim = out_channels * 2 # * 3
         src_dim_dict = dim_dict.copy()
         
@@ -360,6 +360,7 @@ class APHetNetFL(nn.Module):
         self.ap_dim = src_dim_dict['AP']
         self.edge_dim = src_dim_dict['edge']
 
+        self.out_channels = out_channels
 
 
 
@@ -433,7 +434,8 @@ class APHetNetFL(nn.Module):
         
         hid = hid_layers # too much is not good - 8 is bad, 4 is currently good
         
-        self.ue_encoder_raw = MLP([self.ue_dim, hid, out_channels - self.ue_dim], batch_norm=True, dropout_prob=0.1) 
+        # self.ue_encoder_raw = MLP([self.ue_dim, hid, out_channels - self.ue_dim], batch_norm=True, dropout_prob=0.1) 
+        self.ue_encoder_raw = MLP([self.ue_dim, hid, self.ue_dim_aug], batch_norm=True, dropout_prob=0.1) 
         self.ue_encoder_aug = MLP([self.ue_dim_aug, hid, out_channels - self.ue_dim], batch_norm=True, dropout_prob=0.1) 
         self.ap_encoder_raw = MLP([self.ap_dim, hid, out_channels], batch_norm=True, dropout_prob=0.1) 
         self.power_edge = MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1) #  many layer => shit
@@ -477,11 +479,12 @@ class APHetNetFL(nn.Module):
 
         aug_ap = self.ap_encoder_raw(x_dict['AP'] )
         x_dict['AP'] = aug_ap
-        
+        tmp = x_dict['UE'] 
         if isRawData:
-            aug_ue = self.ue_encoder_raw(x_dict['UE'] )
-        else:
-            aug_ue = self.ue_encoder_aug(x_dict['UE'] )
+            tmp = self.ue_encoder_raw(x_dict['UE'] )
+            # aug_ue = torch.zeros(x_dict['UE'].shape[0], self.out_channels - self.ue_dim, device=x_dict['UE'].device)
+        # else:
+        aug_ue = self.ue_encoder_aug(tmp)
 
         x_dict['UE'] = torch.cat(
             [x_dict['UE'] [:,:self.ue_dim], aug_ue], 
@@ -501,12 +504,17 @@ class APHetNetFL(nn.Module):
         for conv in self.convs_post:
             x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
 
-        if not isRawData:
-            edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
-            edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
-                [edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], 
-                dim=1
-            )
+        edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
+        # if not isRawData:
+        #     edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
+        #         [edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], 
+        #         dim=1
+        #     )
+        # else:
+        edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
+            [edge_attr_dict[('AP', 'down', 'UE')][:,:-1], edge_power], 
+            dim=1
+        )
 
         return x_dict, edge_attr_dict, edge_index_dict
     

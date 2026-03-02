@@ -5,10 +5,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Federated Learning Script")
     
     parser.add_argument('--pre_train', type=str, default=None, help="Path to pre trained model (insinde results/models/ folder, without '.pt')")
-    parser.add_argument("--eval_same_data", action="store_true", default=True, help="Eval on the same with training data.")
+    parser.add_argument("--eval_same_data", action="store_true", default=False, help="Eval on the same with training data.")
     parser.add_argument("--eval_plot", action="store_true", default=True, help="Eval Visualization (CDF)")
     
     # System Parameters
+    parser.add_argument('--comm_rounds', type=int, default=1, help="Number of Comm rounds")
     parser.add_argument('--num_ap', type=int, default=30, help="Number of access points")
     parser.add_argument('--num_ue', type=int, default=6, help="Number of user equipments")
     parser.add_argument('--tau', type=int, default=20, help="Pilot length")
@@ -38,10 +39,12 @@ def parse_args():
     parser.add_argument('--cen_lr', type=float, default=5e-3, help="Centralized learning rate")
     parser.add_argument('--num_epochs_cen', type=int, default=1000, help="Number of Centralized training epochs")
     parser.add_argument('--cen_pretrain', type=str, default=None, help="Name of model to load directly without training")
+    parser.add_argument('--cen_hidden_channels', type=int, default=64, help="Number of hidden channels for centralized GNN")
+    parser.add_argument('--cen_num_gnn_layers', type=int, default=3, help="Number of centralized GNN layers")
     
     
     # FL Algorithm Parameters
-    parser.add_argument('--fl_scheme', type=str, choices=['fedavg', 'fedadam', 'fedgm'], default='fedavg', help="Federated Learning scheme")
+    parser.add_argument('--fl_scheme', type=str, choices=['fedavg', 'fedadam', 'fedgm', 'fedprox'], default='fedavg', help="Federated Learning scheme")
     parser.add_argument('--client_fraction', type=float, default=1.0, help="Fraction of clients to be selected per round")
     parser.add_argument('--num_global_ap', type=int, default=1, help="Number of Global AP for knowledge graph")
     parser.add_argument('--mu', type=float, default=0.1, help="Weight for gradient matching (if using FedAvgGradMatch)")
