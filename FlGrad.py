@@ -304,12 +304,13 @@ if __name__ == '__main__':
                 batches = [item['loader'] for item in client_data_tuple]
                 batch_rate = [item['rate_pack'] for item in client_data_tuple]
                 global_rate = [item['global_rate'] for item in client_data_tuple]
+                interference = [item['responsibility'] for item in client_data_tuple]
 
                 if client_idx in selected_clients:
                     for _ in range(num_epochs):
                         train_loss, train_min = fl_train(
                             batches,
-                            batch_rate, global_rate,
+                            batch_rate, global_rate, interference,
                             model, opt,
                             tau=tau, rho_p=rho_p, rho_d=rho_d,
                             num_antenna=num_antenna,
@@ -497,7 +498,7 @@ if __name__ == '__main__':
         plt.legend(fontsize = 14)
         plt.grid()
         
-        figure_name = f'{timestamp}_eval'
+        figure_name = f'{timestamp}_eval' 
         eval_path = EVAL_DIR + f'/{figure_name}.png' 
         plt.savefig(eval_path, dpi=300, bbox_inches='tight')
         print(f'Save Evaluation figure to {eval_path}.')
@@ -507,7 +508,7 @@ if __name__ == '__main__':
     # print("Old: GAP -> UE -> GAP")
     # print("New: UE -> GAP -> UE")
     # print(" local bottleneck in loss ")
-    print('Temp 1.5')
+    print('softmin T=1.0 + lambda=0 + no GAP-UE + 4 GAP-AP layers ')
     # Todo: Try GAP-UE link (parital)
 
     # old best: DS,PC, UI in UE, no GAP, GAP-AP enhanced?

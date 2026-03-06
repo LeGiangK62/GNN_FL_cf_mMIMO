@@ -352,6 +352,7 @@ class APHetNetFL(nn.Module):
 
         GAP_init_dim = out_channels + 0# + 3
         GAP_edge_init_dim = out_channels * 2 # * 3
+        GAP_UE_edge = out_channels
         src_dim_dict = dim_dict.copy()
         
 
@@ -412,6 +413,7 @@ class APHetNetFL(nn.Module):
             [('AP', 'cross-back', 'GAP')]
         ))
         
+        # for _ in range(num_layers): # too many layers break the model
         self.convs_gap.append(APConvLayer(
             {'GAP': out_channels, 'AP': out_channels }, 
             out_channels,
@@ -420,6 +422,17 @@ class APHetNetFL(nn.Module):
         ))
 
         #####
+
+
+        # ### GAP <-> UE
+        # self.conv_gap_ue = APConvLayer(
+        #     {'GAP': out_channels, 'UE': out_channels},
+        #     GAP_UE_edge + 2,           # F+2
+        #     out_channels, src_dim_dict_gap,
+        #     [('GAP', 'serves', 'UE')]
+        # )
+        
+        ###
 
         ### AP -> UE, then AP <-> UE
         self.convs_post = torch.nn.ModuleList()
@@ -498,6 +511,7 @@ class APHetNetFL(nn.Module):
         if not isRawData:
             for conv in self.convs_gap:
                 x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
+            # x_dict, edge_attr_dict = self.conv_gap_ue(x_dict, edge_index_dict, edge_attr_dict)
         
 
         # AP <-> UE

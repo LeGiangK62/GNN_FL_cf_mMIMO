@@ -18,7 +18,7 @@ from Utils.comm import (
 
 
 ###################################################################################
-def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckIndicator, tau, rho_p, rho_d, num_antenna, round_ratio=0, isTrain=True):
+def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckIndicator, tau, rho_p, rho_d, num_antenna, round_ratio=0, responsibility=None, isTrain=True):
     """
     Compute loss for FL training.
 
@@ -69,18 +69,32 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckI
     
 
     # Soft min - better, with temp = 2.1 
-    # min_rate, _ = torch.min(rate, dim=1)
-    temperature = 1.5 # current best 2
+    # soft_min, _ = torch.min(rate, dim=1)
     # temperature = max(1.0, 2.0 * (1 - round_ratio))
+    temperature = 1.0 # current best 1.25 > 1.5 > 2
     soft_min = -torch.logsumexp(-rate / temperature, dim=1) * temperature
-    # loss = -soft_min.mean()
+    
+    loss = -soft_min.mean()
 
+
+    # local_interference = (PC_k + UI_k).sum(dim=1).sum(dim=1)  # [B, K]
+    # if responsibility is not None:
+    #     interference_penalty = (local_interference * responsibility * bottleneckIndicator).sum(dim=1)
+    # else:
+    #     interference_penalty = (local_interference * bottleneckIndicator).sum(dim=1)
+
+    # # alpha = alpha = max(0.3, 1 - round_ratio)
+    # lambda_penalty = 0
+    # loss = - soft_min.mean() + lambda_penalty * interference_penalty.mean()
+
+    # mean_rate = rate.mean(dim=1)
+    # loss = -0.7 * soft_min.mean() - 0.3 * mean_rate.mean()
     # alpha = max(0.3, 1 - round_ratio)
     # loss = - alpha * soft_min.mean() - (1 - alpha) * (bottleneckIndicator * rate).mean()
 
-    local_bi = F.softmax(-rate.detach() / 0.5, dim=1)
-    alpha = max(0.3, 1 - round_ratio)                   # never below 30% soft-min
-    loss = -alpha * soft_min.mean() - (1 - alpha) * (local_bi * rate).mean()
+    # local_bi = F.softmax(-rate.detach() / 0.5, dim=1)
+    # alpha = max(0.3, 1 - round_ratio)                   # never below 30% soft-min
+    # loss = -alpha * soft_min.mean() - (1 - alpha) * (local_bi * rate).mean() 
 
     # NOTE: MEAN RATE DOES NOT HELP
     # NOTE: soft-min is better than hard-min
@@ -93,7 +107,7 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckI
 
 
 def fl_train(
-        dataLoader, responseInfo, globalRates, model, optimizer,
+        dataLoader, responseInfo, globalRates, interferences, model, optimizer,
         tau, rho_p, rho_d, num_antenna, round_ratio=0,
         fed_model=None
 ):
@@ -116,7 +130,7 @@ def fl_train(
     total_min_rate = 0.0
     total_graphs = 0
 
-    for batch, response, global_rate in zip(dataLoader, responseInfo, globalRates):
+    for batch, response, global_rate, interference in zip(dataLoader, responseInfo, globalRates, interferences):
         batch = batch.to(device)
         num_graph = batch.num_graphs
         optimizer.zero_grad()
@@ -126,7 +140,8 @@ def fl_train(
             batch, x_dict, attr_dict, response, global_rate,
             tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
             # epochRatio=epochRatio,
-            round_ratio=round_ratio
+            round_ratio=round_ratio,
+            responsibility=interference,
         )
 
         if fed_model is not None and hasattr(fed_model, 'proximal_term'):
@@ -564,8 +579,15 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
         total_Interf = (all_PC_stack.sum(dim=2) + all_UI_stack.sum(dim=2)).sum(dim=1) # [B, K]
 
         global_ue_context = torch.sum(torch.stack(all_client_embeddings), dim=0)
-        for client_id, (_, batch) in enumerate(zip(all_response, all_loader)):
 
+        all_interf_stack = torch.stack(
+            [(all_PC[j] + all_UI[j]).sum(dim=1) for j in range(num_client)],
+            dim=1
+        )  # [B, num_client, K]
+        total_interf_per_ue = all_interf_stack.sum(dim=1)
+
+        for client_id, (_, batch) in enumerate(zip(all_response, all_loader)):
+            responsibility_k = all_interf_stack[:, client_id, :] / (total_interf_per_ue + 1e-9)  # [B, K]
             other_AP_indices = list(range(client_id)) + list(range(client_id + 1, num_client))
 
             ## DS, PC, UI
@@ -761,7 +783,45 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
             aug_batch['AP', 'cross-back', 'GAP'].edge_index = edge_index_inteference_back
             aug_batch['AP', 'cross-back', 'GAP'].edge_attr = edge_attr_inteference
 
-            ## GAP - UE edge 
+            ## GAP - UE edge (selective: top bottleneck UEs only)
+            B_top = 1 #num_ue_per_graph//2  # selective: only top-2 bottleneck UEs  # 1 UE is shiet, 2 is worse than all?
+            K = num_ue_per_graph
+
+            # 1) Select top-B_top bottleneck UEs
+            w = bottleneck_indicator_mtx.to(device)          # [B, K]
+            ue_top_idx = torch.topk(w, k=B_top, dim=1).indices  # [B, B_top]
+
+            # 2) Filter DS/interference for selected GAPs (top_idx) and selected UEs (ue_top_idx)
+            ds_filtered   = other_DS.gather(1, top_idx.unsqueeze(-1).expand(-1, -1, K))     # [B, num_GAP, K]
+            itf_filtered  = (other_PC + other_UI).gather(1, top_idx.unsqueeze(-1).expand(-1, -1, K))  # [B, num_GAP, K]
+
+            # Gather at selected UEs: [B, num_GAP, B_top]
+            ds_sel  = ds_filtered.gather(2, ue_top_idx.unsqueeze(1).expand(-1, num_GAP, -1))
+            itf_sel = itf_filtered.gather(2, ue_top_idx.unsqueeze(1).expand(-1, num_GAP, -1))
+
+            # 3) Edge features [B, num_GAP, B_top, F+2] → [B*G*B_top, F+2]
+            edge_bgkf = edge_reshaped.permute(0, 2, 1, 3)    # [B, num_GAP, K, F]
+            edge_bgkf_sel = edge_bgkf.gather(
+                2, ue_top_idx.unsqueeze(1).unsqueeze(-1).expand(-1, num_GAP, -1, edge_feat_dim)
+            )  # [B, num_GAP, B_top, F]
+
+            edge_attr_gap_ue = torch.cat([
+                edge_bgkf_sel,
+                ds_sel.unsqueeze(-1),
+                itf_sel.unsqueeze(-1)
+            ], dim=-1).reshape(-1, edge_feat_dim + 2)          # [B*G*B_top, F+2]
+
+            # 4) Edge index: GAP_g → UE_k
+            b_ids = torch.arange(num_batch, device=device)
+            gap_global = (b_ids.unsqueeze(1) * num_GAP + torch.arange(num_GAP, device=device))  # [B, G]
+            ue_global  = b_ids.unsqueeze(1) * K + ue_top_idx                        # [B, B_top]
+
+            gap_src = gap_global.unsqueeze(2).expand(-1, -1, B_top).reshape(-1)     # [B*G*B_top]
+            ue_dst  = ue_global.unsqueeze(1).expand(-1, num_GAP, -1).reshape(-1)          # [B*G*B_top]
+
+            aug_batch['GAP', 'serves', 'UE'].edge_index = torch.stack([gap_src, ue_dst], dim=0)
+            aug_batch['GAP', 'serves', 'UE'].edge_attr  = edge_attr_gap_ue
+
 
             ########### End
 
@@ -792,6 +852,10 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
             # Tells the UE if it is in a "high power" or "low power" regime globally
             global_sinr = (2 ** global_rate - 1).reshape(-1, 1)
 
+            global_sinr_val = (2 ** global_rate - 1)
+            interference_sensitivity = (global_sinr_val / ((total_Interf + 1e-9) * (1 + global_sinr_val)))
+            gradient_penalty = (interference_sensitivity * bottleneck_indicator_mtx).reshape(-1, 1)
+
 
             aug_batch['UE'].x = torch.cat(
                 [
@@ -801,7 +865,8 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
                     # normalized_rank,         # [Focus: Hard priority] <--- NEW
                     contribution_ratio,      # [Action: How much I help]
                     interference_share,      # [Action: How much I hurt] <--- NEW
-                    global_sinr              # [State: How good is the user globally] <--- NEW
+                    global_sinr,             # [State: How good is the user globally] <--- NEW
+                    # gradient_penalty
                 ],
                 dim=-1
             )
@@ -815,7 +880,8 @@ def server_return_GAP(dataLoader, globalInformation, num_antenna=1):
             client_data = {
                 'loader': aug_batch,
                 'rate_pack': other_pack,
-                'global_rate': bottleneck_indicator_mtx
+                'global_rate': bottleneck_indicator_mtx,
+                'responsibility': responsibility_k.to(device)
             }
             aug_batch_list.append(client_data)
         response_all.append(aug_batch_list)
