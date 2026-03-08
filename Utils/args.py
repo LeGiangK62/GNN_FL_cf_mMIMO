@@ -44,7 +44,7 @@ def parse_args():
     
     
     # FL Algorithm Parameters
-    parser.add_argument('--fl_scheme', type=str, choices=['fedavg', 'fedadam', 'fedgm', 'fedprox'], default='fedavg', help="Federated Learning scheme")
+    parser.add_argument('--fl_scheme', type=str, choices=['fedavg', 'fedadam', 'fedgm', 'fedprox', 'scaffold'], default='fedavg', help="Federated Learning scheme")
     parser.add_argument('--client_fraction', type=float, default=1.0, help="Fraction of clients to be selected per round")
     parser.add_argument('--num_global_ap', type=int, default=1, help="Number of Global AP for knowledge graph")
     parser.add_argument('--mu', type=float, default=0.1, help="Weight for gradient matching (if using FedAvgGradMatch)")

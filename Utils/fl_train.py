@@ -66,16 +66,29 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckI
 
     rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)  # [B, K]
     min_rate_detach, _ = torch.min(rate.detach(), dim=1)
+
+
     
 
     # Soft min - better, with temp = 2.1 
     # soft_min, _ = torch.min(rate, dim=1)
     # temperature = max(1.0, 2.0 * (1 - round_ratio))
-    temperature = 1.0 # current best 1.25 > 1.5 > 2
-    soft_min = -torch.logsumexp(-rate / temperature, dim=1) * temperature
-    
-    loss = -soft_min.mean()
+    temperature = 1.25 # current best 1.25 > 1.5 > 2
 
+    # if round_ratio < 0.5:
+    #     temperature = 1.25
+    # else:
+    #     progress = (round_ratio - 0.5) / 0.5   # 0 -> 1
+    #     temperature = 1.25 - (1.25 - 0.9) * progress   # 1.25 -> 0.5
+    soft_min = -torch.logsumexp(-rate / temperature, dim=1) * temperature
+
+    # power_reg = (power_matrix ** 2).mean()
+    loss = - soft_min.mean()# + 1e-4 * power_reg
+
+    # rate_detached = rate.detach()
+    # weights = torch.softmax(-rate_detached / 0.75, dim=1)   # nhấn mạnh UE tệ
+    # weighted_rate = (weights * rate).sum(dim=1)
+    # loss = -0.5 * soft_min.mean() - 0.5 * weighted_rate.mean() + 1e-4 * power_reg
 
     # local_interference = (PC_k + UI_k).sum(dim=1).sum(dim=1)  # [B, K]
     # if responsibility is not None:
@@ -109,7 +122,7 @@ def loss_function(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckI
 def fl_train(
         dataLoader, responseInfo, globalRates, interferences, model, optimizer,
         tau, rho_p, rho_d, num_antenna, round_ratio=0,
-        fed_model=None
+        fed_model=None, client_idx=None
 ):
     """
     Train a local FL model for one epoch.
@@ -150,6 +163,9 @@ def fl_train(
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient Clipping
+        # SCAFFOLD
+        if fed_model is not None and hasattr(fed_model, 'apply_correction') and client_idx is not None:
+            fed_model.apply_correction(model, client_idx)
         optimizer.step()
 
         total_loss += loss.item() * num_graph
@@ -1462,3 +1478,64 @@ def get_model_gradients(global_model, local_models):
         local_gradients.append(client_grad)
         
     return local_gradients
+
+
+class SCAFFOLD:
+    def __init__(self, client_fraction=1.0, seed=1712):
+        self.client_fraction = client_fraction
+        self.global_control = None   # c
+        self.client_controls = None  # c_i per client
+        self.num_clients = None
+        if seed is not None:
+            random.seed(seed)
+
+    def init_controls(self, global_model, num_clients):
+        self.num_clients = num_clients
+        template = {
+            name: torch.zeros_like(param)
+            for name, param in global_model.named_parameters()
+            if param.requires_grad
+        }
+        self.global_control = copy.deepcopy(template)
+        self.client_controls = [copy.deepcopy(template) for _ in range(num_clients)]
+
+    def apply_correction(self, model, client_idx):
+        """Gọi sau backward(), trước optimizer.step()"""
+        ci = self.client_controls[client_idx]
+        c = self.global_control
+        for name, param in model.named_parameters():
+            if param.grad is not None and name in c:
+                param.grad.add_(c[name].to(param.device) - ci[name].to(param.device))
+
+    def update_client_control(self, model, global_model, client_idx, K, lr):
+        """Gọi sau khi local training xong. K = tổng số optimizer.step()"""
+        ci = self.client_controls[client_idx]
+        c = self.global_control
+        delta_c = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in ci:
+                w_global = global_model.state_dict()[name].to(param.device)
+                ci_new = ci[name].to(param.device) - c[name].to(param.device) + (w_global - param.data) / (K * lr)
+                delta_c[name] = (ci_new - ci[name].to(param.device)).detach()
+                ci[name] = ci_new.detach().cpu()
+        return delta_c
+
+    def aggregate_controls(self, delta_c_list, selected_clients):
+        N = self.num_clients
+        for name in self.global_control:
+            total_delta = sum(delta_c_list[i][name].to(self.global_control[name].device) for i in selected_clients)
+            self.global_control[name] += total_delta / N
+
+    def aggregate(self, global_model, local_models, selected_clients):
+        # Same as FedAvg
+        local_weights = [copy.deepcopy(m.state_dict()) for m in local_models]
+        if not selected_clients:
+            return copy.deepcopy(global_model.state_dict())
+        avg_state = copy.deepcopy(local_weights[selected_clients[0]])
+        n = len(selected_clients)
+        for k in avg_state.keys():
+            if isinstance(avg_state[k], torch.Tensor) and torch.is_floating_point(avg_state[k]):
+                for i in selected_clients[1:]:
+                    avg_state[k] += local_weights[i][k]
+                avg_state[k] /= n
+        return avg_state

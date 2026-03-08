@@ -22,11 +22,11 @@ from Utils.fl_train import FedAvg, FedProx, SCAFFOLD
 
 
 
-SAVE_DIR = 'results'
-MODEL_DIR = "results/models/"
-EVAL_DIR = "results/eval/"
-FIG_DIR = "results/figs"
-TRAIN_DIR = "results/train/"
+SAVE_DIR = 'results/sumrate'
+MODEL_DIR = SAVE_DIR + "/models/"
+EVAL_DIR = SAVE_DIR + "/eval/"
+FIG_DIR = SAVE_DIR + "/figs"
+TRAIN_DIR = SAVE_DIR + "/train/"
 
 def init_folder():
     os.makedirs(MODEL_DIR, exist_ok=True)
@@ -520,13 +520,3 @@ if __name__ == '__main__':
         plt.savefig(eval_path, dpi=300, bbox_inches='tight')
         print(f'Save Evaluation figure to {eval_path}.')
 
-
-    # print('Current best: bottleneck_indicator, contribution_ratio,  interference_share,  global_sinr')
-    # print("Old: GAP -> UE -> GAP")
-    # print("New: UE -> GAP -> UE")
-    # print(" local bottleneck in loss ")
-    print(f'base with scaffold')
-    # Todo: Try GAP-UE link (parital)
-
-    # old best: DS,PC, UI in UE, no GAP, GAP-AP enhanced?
-    
