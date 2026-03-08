@@ -1539,3 +1539,176 @@ class SCAFFOLD:
                     avg_state[k] += local_weights[i][k]
                 avg_state[k] /= n
         return avg_state
+    
+
+### Sum rate function
+
+def loss_function_sumrate(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckIndicator, tau, rho_p, rho_d, num_antenna, round_ratio=0, responsibility=None, isTrain=True):
+    """
+    Compute loss for FL training.
+
+    Args:
+        graphData: HeteroData batch
+        nodeFeatDict: Node features from model
+        edgeDict: Edge features from model
+        clientResponse: List of dicts with DS/PC/UI from other clients
+        tau, rho_p, rho_d, num_antenna: Communication parameters
+        epochRatio: Training progress ratio (unused)
+
+    Returns:
+        loss: Scalar loss value
+        sunm_rate_detach: [B] tensor of sum rates for monitoring
+    """
+    num_graphs = graphData.num_graphs
+    num_UEs = graphData['UE'].x.shape[0]//num_graphs
+    num_APs = graphData['AP'].x.shape[0]//num_graphs
+
+    pilot_matrix = graphData['UE'].x[:,:tau].reshape(num_graphs, num_UEs, -1)
+
+    large_scale = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,0]
+    power_matrix_raw = edgeDict['AP','down','UE'].reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,-1]
+
+    large_scale = torch.expm1(large_scale)
+    channel_variance = graphData['AP', 'down', 'UE'].edge_attr.reshape(num_graphs, num_APs, num_UEs, -1)[:,:,:,1]
+
+    power_matrix_raw = power_matrix_raw[:,:1,:]
+    channel_variance = channel_variance[:,:1,:]
+    large_scale = large_scale[:,:1,:]
+
+    power_matrix = power_from_raw(power_matrix_raw, channel_variance, num_antenna)
+    DS_k, PC_k, UI_k = component_calculate(power_matrix, channel_variance, large_scale, pilot_matrix, rho_d=rho_d)
+    
+    if not isTrain:
+        return DS_k, PC_k, UI_k
+    
+    all_DS = [DS_k] + [r['DS'] for r in clientResponse]
+    all_PC = [PC_k] + [r['PC'] for r in clientResponse]
+    all_UI = [UI_k] + [r['UI'] for r in clientResponse]
+
+    all_DS = torch.cat(all_DS, dim=1)
+    all_PC = torch.cat(all_PC, dim=1)
+    all_UI = torch.cat(all_UI, dim=1)
+
+    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)  # [B, K]
+    sum_rate = torch.sum(rate, dim=1)
+    sum_rate_detach = torch.sum(rate.detach(), dim=1)
+
+    loss = - sum_rate.mean()
+
+    return loss, sum_rate_detach
+
+
+
+def fl_train_sumrate(
+        dataLoader, responseInfo, globalRates, interferences, model, optimizer,
+        tau, rho_p, rho_d, num_antenna, round_ratio=0
+):
+    """
+    Train a local FL model for one epoch.
+
+    Args:
+        dataLoader: List of graph batches for this client
+        responseInfo: List of rate_pack (DS/PC/UI from other clients)
+        model: Local model
+        optimizer: Local optimizer
+        tau, rho_p, rho_d, num_antenna: Communication parameters
+    Returns:
+        avg_loss, avg_min_rate
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.train()
+
+    total_loss = 0.0
+    total_min_rate = 0.0
+    total_graphs = 0
+
+    for batch, response, global_rate, interference in zip(dataLoader, responseInfo, globalRates, interferences):
+        batch = batch.to(device)
+        num_graph = batch.num_graphs
+        optimizer.zero_grad()
+        x_dict, attr_dict, _ = model(batch, isRawData=False)
+        loss, min_rate = loss_function_sumrate(
+        # loss, min_rate = loss_function_guided(
+            batch, x_dict, attr_dict, response, global_rate,
+            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
+            # epochRatio=epochRatio,
+            round_ratio=round_ratio,
+            responsibility=interference,
+        )
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient Clipping
+        optimizer.step()
+
+        total_loss += loss.item() * num_graph
+        total_min_rate += min_rate.mean().item() * num_graph
+        total_graphs += num_graph
+
+
+    return total_loss/total_graphs, total_min_rate/total_graphs
+
+
+@torch.no_grad()
+def fl_eval_sumrate(
+        dataLoader, local_models, comm_round,
+        tau, rho_p, rho_d, num_antenna
+    ):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    num_clients = len(local_models)
+
+    send_to_server = get_global_info(
+        dataLoader, local_models,
+        tau=tau, rho_p=rho_p, rho_d=rho_d,
+        num_antenna=num_antenna
+    )
+
+    # response_from_server = server_return(dataLoader, send_to_server, num_antenna=num_antenna)
+    response_from_server = server_return_GAP(dataLoader, send_to_server, num_antenna=num_antenna)
+    for _ in range(comm_round):
+        send_to_server = get_global_info_2nd(
+            response_from_server, local_models,
+            tau=tau, rho_p=rho_p, rho_d=rho_d,
+            num_antenna=num_antenna
+        )
+
+        response_from_server = server_return_GAP(dataLoader, send_to_server, num_antenna=num_antenna)
+
+    
+
+    all_DS = [[] for i in range(num_clients)]
+    all_PC = [[] for i in range(num_clients)]
+    all_UI = [[] for i in range(num_clients)]
+
+    for client_idx, (model, client_data_tuple) in enumerate(zip(local_models, zip(*response_from_server))):
+        batches = [item['loader'] for item in client_data_tuple]
+        batch_rate = [item['rate_pack'] for item in client_data_tuple]
+        globalRates = [item['global_rate'] for item in client_data_tuple]
+
+
+        for batch, response, global_rate in zip(batches, batch_rate, globalRates):
+            batch = batch.to(device)
+            num_graph = batch.num_graphs
+            x_dict, attr_dict, _ = model(batch, isRawData=False)
+            DS_k, PC_k, UI_k = loss_function_sumrate(
+                batch, x_dict, attr_dict, response, global_rate,
+                tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
+                isTrain=False
+            )
+
+            all_DS[client_idx].append(DS_k.detach())
+            all_PC[client_idx].append(PC_k.detach())
+            all_UI[client_idx].append(UI_k.detach())
+
+    all_DS = [torch.cat(client_batches, dim=0) for client_batches in all_DS]
+    all_PC = [torch.cat(client_batches, dim=0) for client_batches in all_PC]
+    all_UI = [torch.cat(client_batches, dim=0) for client_batches in all_UI]
+
+    all_DS = torch.cat(all_DS, dim=1)
+    all_PC = torch.cat(all_PC, dim=1)
+    all_UI = torch.cat(all_UI, dim=1)
+    
+    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)
+
+    sum_rate = torch.sum(rate, dim=1)
+
+    return sum_rate

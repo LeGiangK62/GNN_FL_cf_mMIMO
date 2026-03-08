@@ -157,4 +157,111 @@ def cen_eval(
 
     return total_min_rate/total_graphs 
 
+## Sum rate function+
+
+
+def cen_loss_function_sumrate(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_antenna, epochRatio=1, eval_mode=False):
+    num_graph = graphData.num_graphs
+    criterion = nn.MSELoss(reduction='mean') 
+    
+        
+    # label_power = torch.sqrt(graphData.y)
+    num_APs = graphData['AP'].x.shape[0]//num_graph
+    num_UEs = graphData['UE'].x.shape[0]//num_graph
+    
+    large_scale = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,0]
+    large_scale = torch.expm1(large_scale)
+    power_matrix_raw = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,-1]
+    # ap_gate = nodeFeatDict['AP'].reshape(num_graph, num_APs, -1)
+    phi_matrix = graphData['UE'].x[:,:tau].reshape(num_graph, num_UEs, -1)
+    # channel_var = variance_calculate(large_scale, phi_matrix, tau=tau, rho_p=rho_p)
+    channel_var = edgeDict['AP','down','UE'].reshape(num_graph, num_APs, num_UEs, -1)[:,:,:,1]
+    # p_max = (1.0 / num_antenna) ** 0.5
+    # den = torch.logsumexp(power_matrix_raw + torch.log(channel_var), dim=2, keepdim=True)
+    # term_1 = torch.exp(0.5 * (power_matrix_raw-den))
+    # term_2 = torch.sigmoid(torch.sum(power_matrix_raw, dim=2, keepdim=True))
+    # term_2 = term_2 ** 0.5
+    # power_matrix = p_max  * term_1 * term_2 # Sqrt of power 
+    power_matrix = power_from_raw(power_matrix_raw, channel_var, num_antenna)
+    
+    # rate = rate_calculation(power_matrix, large_scale, channel_var, phi_matrix, rho_d, num_antenna)
+    
+    all_DS, all_PC, all_UI = component_calculate(power_matrix, channel_var, large_scale, phi_matrix, rho_d=rho_d)
+    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna, rho_d=rho_d)
+    
+    if torch.isnan(rate).any():
+        print(power_matrix_raw)
+        raise ValueError('Nan in rate')
+    
+    
+    if eval_mode:
+        sum_rate = torch.sum(rate,dim=1)
+        full = torch.ones_like(power_matrix)
+        rate_full_one = rate_calculation(full, large_scale, channel_var, phi_matrix, rho_d, num_antenna)
+        sum_rate_one = torch.sum(rate_full_one,dim=1)
+        return sum_rate, sum_rate_one
+    else:
+        epochRatio = min(1.0, epochRatio)
+        sum_rate = torch.sum(rate,dim=1)
+        sum_rate_detach = torch.sum(rate.detach(),dim=1)
+        loss = torch.mean(-sum_rate)
+
+        return loss, torch.mean(sum_rate_detach.detach())
+    
+
+def cen_train_sumrate( epochRatio,
+        dataLoader, model, optimizer,
+        tau, rho_p, rho_d, num_antenna
+    ):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.train()
+    
+    total_loss = 0.0
+    total_graphs = 0
+    for batch in dataLoader:
+        optimizer.zero_grad(set_to_none=True) 
+        batch = batch.to(device)
+        num_graph = batch.num_graphs
+        
+        x_dict, edge_dict, edge_index = model(batch)
+        loss, _ = cen_loss_function_sumrate(
+            batch, x_dict, edge_dict,
+            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
+            epochRatio=epochRatio
+        )
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item() * num_graph
+        total_graphs += num_graph
+
+    return total_loss/total_graphs
+
+
+
+@torch.no_grad()
+def cen_eval_sumrate(
+        dataLoader, model,
+        tau, rho_p, rho_d, num_antenna
+    ):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.eval()
+    
+    total_min_rate = 0.0
+    total_graphs = 0
+    for batch in dataLoader:
+        batch = batch.to(device)
+        num_graph = batch.num_graphs
+        
+        x_dict, edge_dict, edge_index = model(batch)
+        _, sum_rate = cen_loss_function_sumrate(
+            batch, x_dict, edge_dict,
+            tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+        )
+        
+        total_min_rate += sum_rate.item() * num_graph
+        total_graphs += num_graph
+
+    return total_min_rate/total_graphs 
+
 

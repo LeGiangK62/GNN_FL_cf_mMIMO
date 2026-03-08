@@ -14,11 +14,11 @@ from Utils.data_gen import build_cen_loader, build_decen_loader
 
 from Models.GNN import APHetNet, APHetNetFL
 from Utils.args import parse_args
-from Utils.centralized_train import cen_eval, cen_train, cen_loss_function
+from Utils.centralized_train import cen_eval_sumrate, cen_train_sumrate, cen_loss_function_sumrate
 # from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
 
-from Utils.fl_train import fl_train, get_global_info, fl_eval, server_return_GAP, get_global_info_2nd
-from Utils.fl_train import FedAvg, FedProx, SCAFFOLD
+from Utils.fl_train import fl_train_sumrate, get_global_info, fl_eval_sumrate, server_return_GAP, get_global_info_2nd
+from Utils.fl_train import FedAvg, FedProx
 
 
 
@@ -213,7 +213,6 @@ if __name__ == '__main__':
         aug_feat_dim=aug_ue_dim,  # DS, PC, UI, rate_without_me + 3?
         num_layers=num_gnn_layers,
         hid_layers=hidden_channels//2,
-        isDecentralized=False  # Use same architecture as centralized
     ).to(device)
 
     global_optimizer = torch.optim.AdamW(global_model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
@@ -222,15 +221,6 @@ if __name__ == '__main__':
         global_optimizer, step_size=num_rounds//3, gamma=0.5
     )
 
-    # Optional: Warm-start from centralized model (transfer learning)
-    # if cen_pretrain is not None:
-    #     # Load centralized weights but skip UE input layer due to dimension mismatch
-    #     from Utils.decentralized_train import load_state_dict_skipping
-    #     load_state_dict_skipping(
-    #         global_model,
-    #         cen_model.state_dict(),
-    #         exclude_contains=('convs.0.msg.UE',)  # Skip first UE message layer
-    #     )
 
     local_models, optimizers, schedulers = [], [], []
     for _ in range(num_clients):
@@ -238,7 +228,7 @@ if __name__ == '__main__':
             metadata=tt_meta,
             dim_dict=dim_dict,
             out_channels=hidden_channels,
-            aug_feat_dim=aug_ue_dim,  # DS, PC, UI, rate_without_me + 3?
+            aug_feat_dim=aug_ue_dim,
             num_layers=num_gnn_layers,
             hid_layers=hidden_channels//2,
             isDecentralized=False
@@ -260,9 +250,9 @@ if __name__ == '__main__':
     elif args.fl_scheme == 'fedprox':
         fed = FedProx(client_fraction=client_fraction, mu=args.mu)
         fed.set_global_weights(global_model)
-    elif args.fl_scheme == 'scaffold':
-        fed = SCAFFOLD(client_fraction=client_fraction)
-        fed.init_controls(global_model, num_clients)
+    # elif args.fl_scheme == 'scaffold':
+    #     fed = SCAFFOLD(client_fraction=client_fraction)
+    #     fed.init_controls(global_model, num_clients)
     else:
         raise ValueError(f'Handling global update in {args.fl_scheme.upper()} is not supported!')
     
@@ -313,14 +303,13 @@ if __name__ == '__main__':
 
                 if client_idx in selected_clients:
                     for _ in range(num_epochs):
-                        train_loss, train_min = fl_train(
+                        train_loss, train_min = fl_train_sumrate(
                             batches,
                             batch_rate, global_rate, interference,
                             model, opt,
                             tau=tau, rho_p=rho_p, rho_d=rho_d,
                             num_antenna=num_antenna,
                             round_ratio=round/num_rounds,
-                            fed_model=fed, client_idx=client_idx
                         )
                     if hasattr(fed, 'update_client_control'):    
                         lr_current = opt.param_groups[0]['lr']
@@ -339,13 +328,13 @@ if __name__ == '__main__':
 
             if round % eval_round == 0:
                 ## Evaluate on the client local data (both train and test)
-                total_train_rate = fl_eval(
+                total_train_rate = fl_eval_sumrate(
                     train_loader, local_models, comm_rounds,
                     tau, rho_p, rho_d, num_antenna
                 )
                 total_train_rate = torch.mean(total_train_rate).cpu().detach()
 
-                total_eval_rate = fl_eval(
+                total_eval_rate = fl_eval_sumrate(
                     test_loader, local_models, comm_rounds,
                     tau, rho_p, rho_d, num_antenna
                 )
@@ -412,7 +401,7 @@ if __name__ == '__main__':
         print(f'Optimal rate: train {np.mean(opt_train_rates[train_idx])}, test {np.mean(opt_train_rates[test_idx])}')
         for epoch in range(num_epochs_cen):
             cen_model.train()
-            train_loss = cen_train(
+            train_loss = cen_train_sumrate(
                 epoch/(2*num_epochs_cen//3),
                 train_loader_cen, cen_model, cen_optimizer,
                 tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
@@ -420,11 +409,11 @@ if __name__ == '__main__':
             
             cen_model.eval()
             with torch.no_grad():
-                train_eval = cen_eval(
+                train_eval = cen_eval_sumrate(
                     train_loader_cen, cen_model,
                     tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
                 )   
-                test_eval = cen_eval(
+                test_eval = cen_eval_sumrate(
                     test_loader_cen, cen_model,
                     tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
                 )  
@@ -474,7 +463,7 @@ if __name__ == '__main__':
             num_graph = batch.num_graphs
             x_dict, edge_dict, edge_index = cen_model(batch)
             
-            gnn_rates, all_one_rates = cen_loss_function(
+            gnn_rates, all_one_rates = cen_loss_function_sumrate(
                 batch, x_dict, edge_dict,
                 tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna, 
                 eval_mode=True
@@ -484,7 +473,7 @@ if __name__ == '__main__':
             local_model.eval()
 
 
-        fl_gnn_rates = fl_eval(
+        fl_gnn_rates = fl_eval_sumrate(
             eval_loader, local_models, comm_rounds,
             tau, rho_p, rho_d, num_antenna
         )
@@ -520,3 +509,7 @@ if __name__ == '__main__':
         plt.savefig(eval_path, dpi=300, bbox_inches='tight')
         print(f'Save Evaluation figure to {eval_path}.')
 
+
+
+## Todo: Check on the benchmark
+# Try not using the DS/PC/UI when local training (using MLP to predict using GAP feature)
