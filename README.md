@@ -76,3 +76,9 @@ Please cite my paper (To be update...)
 ## Contact
 
 Mr. Le Tung GIANG - tung.giangle99@gmail.com or giang.lt2399144@pusan.ac.kr
+
+
+## Todos
+### Sumrate: 
+### How to not using the DS/PC/UI in calculating the loss
+### Currently, only local rate -> not goods

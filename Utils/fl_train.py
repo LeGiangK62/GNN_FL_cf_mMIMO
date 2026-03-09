@@ -1581,9 +1581,9 @@ def loss_function_sumrate(graphData, nodeFeatDict, edgeDict, clientResponse, bot
     if not isTrain:
         return DS_k, PC_k, UI_k
     
-    all_DS = [DS_k] + [r['DS'] for r in clientResponse]
-    all_PC = [PC_k] + [r['PC'] for r in clientResponse]
-    all_UI = [UI_k] + [r['UI'] for r in clientResponse]
+    all_DS = [DS_k] # + [r['DS'] for r in clientResponse]
+    all_PC = [PC_k] # + [r['PC'] for r in clientResponse]
+    all_UI = [UI_k] # + [r['UI'] for r in clientResponse]
 
     all_DS = torch.cat(all_DS, dim=1)
     all_PC = torch.cat(all_PC, dim=1)
