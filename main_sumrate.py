@@ -12,7 +12,7 @@ import numpy as np
 import scipy.io
 from Utils.data_gen import build_cen_loader, build_decen_loader
 
-from Models.GNN import APHetNet, APHetNetFL
+from Models.GNN import APHetNet, APHetNetFL_sumrate as APHetNetFL
 from Utils.args import parse_args
 from Utils.centralized_train import cen_eval_sumrate, cen_train_sumrate, cen_loss_function_sumrate
 # from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
@@ -101,14 +101,18 @@ if __name__ == '__main__':
     torch.manual_seed(seed)
     
     # Load data
-    file_name = f'dl_data_with_power_10000_{num_ue}_{num_ap}'
+    # file_name = f'dl_data_with_power_10000_{num_ue}_{num_ap}'
+    file_name = f'dl_sumrate_data_2000_{num_ue}_{num_ap}'
     mat_data = scipy.io.loadmat('Data/' + file_name + '.mat')
     beta_all = mat_data['betas']
     gamma_all = mat_data['Gammas']
-    power_all = mat_data['power']/rho_d
+    # power_all = mat_data['power']/rho_d
     phi_all = mat_data['Phii_cf'].transpose(0, 2, 1)
-    opt_train_rates = mat_data['R_cf_opt_min'][0]
+    rates_equal_solutions = mat_data['R_equal'][0]
+    rates_frac_solutions = mat_data['R_frac'][0]
+    rates_log_solutions = mat_data['R_log'][0]
     label_all = None
+
     
     perm = np.random.RandomState(seed).permutation(beta_all.shape[0])
     train_idx = perm[:num_train]
@@ -266,7 +270,9 @@ if __name__ == '__main__':
         start_time = datetime.now().strftime("%Y%m%d-%H%M%S")
         print(f"\n ===={start_time}==== Training FL-GNN using {args.fl_scheme.upper()} ... ")
         start_time = time.time()
-        print(f'Optimal rate: train {np.mean(opt_train_rates[train_idx])}, test {np.mean(opt_train_rates[test_idx])}')
+        print(f'Equal Power rate: train {np.mean(rates_equal_solutions[train_idx])}, test {np.mean(rates_equal_solutions[test_idx])}')
+        # print(f'Fractional Power rate: train {np.mean(rates_frac_solutions[train_idx])}, test {np.mean(rates_frac_solutions[test_idx])}')
+        print(f'Log Approximation rate: train {np.mean(rates_log_solutions[train_idx])}, test {np.mean(rates_log_solutions[test_idx])}')
         for round in range(num_rounds):
             ## Send the information to the global server
             ## DS, PC, UI - for rate calculation
@@ -303,12 +309,12 @@ if __name__ == '__main__':
 
                 if client_idx in selected_clients:
                     for _ in range(num_epochs):
-                        train_loss, train_min = fl_train_sumrate(
+                        train_loss, _ = fl_train_sumrate(
                             batches,
                             batch_rate, global_rate, interference,
                             model, opt,
                             tau=tau, rho_p=rho_p, rho_d=rho_d,
-                            num_antenna=num_antenna,
+                            num_antenna=num_antenna, alpha=args.alpha,
                             round_ratio=round/num_rounds,
                         )
                     if hasattr(fed, 'update_client_control'):    
@@ -360,13 +366,16 @@ if __name__ == '__main__':
         end_time = time.time()
         execution_time = end_time - start_time
         print(f"Execution Time: {timedelta(seconds=execution_time)}")
+        fl_model_filename = f'{MODEL_DIR}/{timestamp}_fl.pth'
+        torch.save(global_model.state_dict(), fl_model_filename)
+        print(f'Save FL GNN to {fl_model_filename}.')
 
         plt.figure(figsize=(6,4), dpi=180)
         x_axis = [i * eval_round for i in range(len(fl_all_rate))]
         plt.plot(x_axis, fl_all_rate, label='Training Rate', linewidth=2)
         plt.plot(x_axis, fl_all_rate_test, label='Testing Rate', linewidth=2)
-        plt.axhline(y=np.mean(opt_train_rates[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
-        plt.axhline(y=np.mean(opt_train_rates[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
+        plt.axhline(y=np.mean(rates_log_solutions[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
+        plt.axhline(y=np.mean(rates_log_solutions[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
         plt.xlabel('Rounds', fontsize=12)
         plt.ylabel('Rate', fontsize=12)
         plt.title(f'{args.fl_scheme.upper()}  GNN Training Rate Curve - {args.lr}_{args.num_rounds}', fontsize=14)
@@ -377,12 +386,12 @@ if __name__ == '__main__':
         save_path = TRAIN_DIR + f'{figure_name}.png' 
         plt.savefig(save_path, dpi=300) 
 
-        fl_model_filename = f'{MODEL_DIR}/{timestamp}_fl.pth'
-        torch.save(global_model.state_dict(), fl_model_filename)
-        print(f'Save FL GNN to {fl_model_filename}.')
+        
     else:
         fl_model_filename = f'{MODEL_DIR}/{args.fl_pretrain}.pth'
         global_model.load_state_dict(torch.load(fl_model_filename))
+        for model in local_models:
+            model.load_state_dict(global_model.state_dict())
 
 
     
@@ -398,7 +407,7 @@ if __name__ == '__main__':
         all_rate_test = []
         eval_epochs_cen = num_epochs_cen//10 if num_epochs_cen//10 else 1
         print(f'Training Centralized GNN for benchmark...')
-        print(f'Optimal rate: train {np.mean(opt_train_rates[train_idx])}, test {np.mean(opt_train_rates[test_idx])}')
+        print(f'Optimal rate: train {np.mean(rates_log_solutions[train_idx])}, test {np.mean(rates_log_solutions[test_idx])}')
         for epoch in range(num_epochs_cen):
             cen_model.train()
             train_loss = cen_train_sumrate(
@@ -436,8 +445,8 @@ if __name__ == '__main__':
         plt.figure(figsize=(6,4), dpi=180)
         plt.plot(all_rate, label='Training Rate', linewidth=2)
         plt.plot(all_rate_test, label='Testing Rate', linewidth=2)
-        plt.axhline(y=np.mean(opt_train_rates[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
-        plt.axhline(y=np.mean(opt_train_rates[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
+        plt.axhline(y=np.mean(rates_log_solutions[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Log Appoximation')
+        plt.axhline(y=np.mean(rates_log_solutions[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Log Approximation')
         plt.xlabel('Epoch', fontsize=12)
         plt.ylabel('Rate', fontsize=12)
         plt.title('Centralized GNN Training Rate Curve', fontsize=14)
@@ -482,23 +491,34 @@ if __name__ == '__main__':
         fl_gnn_rates = fl_gnn_rates.detach().cpu().numpy() 
         gnn_rates = gnn_rates.detach().cpu().numpy() 
         all_one_rates = all_one_rates.detach().cpu().numpy()
-        opt_rates = opt_train_rates[eval_idx] 
-        max_value = np.ceil(max(np.max(all_one_rates), np.max(fl_gnn_rates), np.max(gnn_rates), np.max(opt_rates))*100)/100
+        rates_equal = rates_equal_solutions[eval_idx] 
+        rates_frac = rates_frac_solutions[eval_idx] 
+        rates_log = rates_log_solutions[eval_idx] 
+
+        max_value = np.ceil(max(np.max(all_one_rates), np.max(fl_gnn_rates), np.max(gnn_rates), np.max(rates_equal), np.max(rates_frac), np.max(rates_log))*100)/100
+        
+        print(f'Sum rate avg: GNN {gnn_rates.mean():.2f} - FL GNN {fl_gnn_rates.mean():.2f} - {fl_gnn_rates.mean() * 100 / gnn_rates.mean():.2f}%')
         
         min_rate, max_rate = 0, max_value
         # y_axis = np.arange(0, 1.0, 1/202)
         y_axis = np.linspace(0, 1, num_eval+2)
-        gnn_rates.sort();  opt_rates.sort(); all_one_rates.sort(); fl_gnn_rates.sort()
+        gnn_rates.sort();  all_one_rates.sort(); fl_gnn_rates.sort()
+        rates_equal.sort(); rates_frac.sort(); rates_log.sort()
         gnn_rates = np.insert(gnn_rates, 0, min_rate); gnn_rates = np.insert(gnn_rates,num_eval+1,max_rate)
         fl_gnn_rates = np.insert(fl_gnn_rates, 0, min_rate); fl_gnn_rates = np.insert(fl_gnn_rates,num_eval+1,max_rate)
         all_one_rates = np.insert(all_one_rates, 0, min_rate); all_one_rates = np.insert(all_one_rates,num_eval+1,max_rate)
-        opt_rates = np.insert(opt_rates, 0, min_rate); opt_rates = np.insert(opt_rates,num_eval+1,max_rate)
+        rates_equal = np.insert(rates_equal, 0, min_rate); rates_equal = np.insert(rates_equal,num_eval+1,max_rate)
+        rates_frac = np.insert(rates_frac, 0, min_rate); rates_frac = np.insert(rates_frac,num_eval+1,max_rate)
+        rates_log = np.insert(rates_log, 0, min_rate); rates_log = np.insert(rates_log,num_eval+1,max_rate)
 
         plt.figure(figsize=(6,4), dpi=180)
-        plt.plot(all_one_rates, y_axis, label = 'Maximum Power', linewidth=2)
+        # plt.plot(all_one_rates, y_axis, label = 'Maximum Power', linewidth=2)
         plt.plot(gnn_rates, y_axis, label = 'Centralized GNN', linewidth=2)
         plt.plot(fl_gnn_rates, y_axis, label = 'FL GNN', linewidth=2)
         # plt.plot(opt_rates, y_axis, label = 'Optimal', linewidth=2)
+        plt.plot(rates_equal, y_axis, label = 'Equal Power', linewidth=2)
+        # plt.plot(rates_frac, y_axis, label = 'Fractional Power', linewidth=2)
+        plt.plot(rates_log, y_axis, label = 'Log Approx.', linewidth=2)
         plt.xlabel('Sum rate [bps/Hz]', {'fontsize':16})
         plt.ylabel('Empirical CDF', {'fontsize':16})
         plt.legend(fontsize = 14)
@@ -510,6 +530,8 @@ if __name__ == '__main__':
         print(f'Save Evaluation figure to {eval_path}.')
 
 
+
+print(f'Reshape weight alpha {args.alpha}')
 
 ## Todo: Check on the benchmark
 # Try not using the DS/PC/UI when local training (using MLP to predict using GAP feature)

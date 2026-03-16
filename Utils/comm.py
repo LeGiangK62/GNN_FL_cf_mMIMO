@@ -96,9 +96,8 @@ def rate_from_component(desiredSignal, pilotContamination, userInterference, num
     sum_DS = desiredSignal.sum(dim=1)  
     num = (numAntenna**2) * (sum_DS ** 2) 
 
-    sum_PC = pilotContamination.sum(dim=1)
-    sum_UI = userInterference.sum(dim=1)  
-
+    sum_PC = pilotContamination.sum(dim=1) # num_graphs, num_UE_prime, num_UE
+    sum_UI = userInterference.sum(dim=1)  # num_graphs, num_UE_prime, num_UE
     
     sum_PC = sum_PC ** 2
     term1 = sum_PC * (1 - torch.eye(num_UEs, device=device, dtype=dtype))

@@ -52,6 +52,7 @@ def parse_args():
     parser.add_argument('--server_beta1',  type=float, default=0.9,   help="Server beta1 for FedAdam")
     parser.add_argument('--server_beta2',  type=float, default=0.99,  help="Server beta2 for FedAdam")
     parser.add_argument('--server_eps',    type=float, default=1e-8,  help="Server eps for FedAdam")
+    parser.add_argument('--alpha',    type=float, default=0.5,  help="Salpha for sumrate loss")
     # Model and Data Parameters
     parser.add_argument('--is_edge_update', type=bool, default=True, help="Whether to perform edge update")
     parser.add_argument('--hidden_channels', type=int, default=32, help="Number of hidden channels for GNN")

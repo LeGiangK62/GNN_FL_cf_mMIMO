@@ -1543,7 +1543,7 @@ class SCAFFOLD:
 
 ### Sum rate function
 
-def loss_function_sumrate(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckIndicator, tau, rho_p, rho_d, num_antenna, round_ratio=0, responsibility=None, isTrain=True):
+def loss_function_sumrate(graphData, nodeFeatDict, edgeDict, clientResponse, bottleneckIndicator, tau, rho_p, rho_d, num_antenna, round_ratio=0, alpha=None, responsibility=None, isTrain=True):
     """
     Compute loss for FL training.
 
@@ -1589,11 +1589,25 @@ def loss_function_sumrate(graphData, nodeFeatDict, edgeDict, clientResponse, bot
     all_PC = torch.cat(all_PC, dim=1)
     all_UI = torch.cat(all_UI, dim=1)
 
-    rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)  # [B, K]
-    sum_rate = torch.sum(rate, dim=1)
-    sum_rate_detach = torch.sum(rate.detach(), dim=1)
+    local_rate = rate_from_component(all_DS, all_PC, all_UI, num_antenna)  # [B, K]
+    sum_rate_detach = torch.sum(local_rate.detach(), dim=1)
 
-    loss = - sum_rate.mean()
+    global_sinr = graphData['UE'].x[:,-1:]
+    bottle_neck = graphData['UE'].x[:,-4:-3]
+    weight = bottle_neck/(1 + global_sinr)
+    weight = weight.reshape(num_graphs, num_UEs).unsqueeze(1)
+
+    local_interf_per_ue = PC_k.sum(dim=2) + UI_k.sum(dim=2) 
+    if not alpha:
+        alpha = 0.1 # 0.01 -> 9.09, 0.05-> 10.43, 0.1 -> 10.8592, 0.15 -> 11.048, 0.16 -> 11.07, 0.18 -> 11.1133, 0.19 -> 11.1189 , 
+        ## 0.2 -> 11.1050,  0.21 -> 11.10, 0.25 -> 10.91, 0.3 -> 10.42, 0.35 -> 9.717, 0.5 ->  6.58, 1 -> 0.004 
+    # before reshape 0.01 -> 9.27, 0.05 -> 10.00, 0.1 -> 10.71, 0.2-> 11.18, 0.5 -> 8
+
+    loss = -(weight * DS_k).sum(dim=1).mean() + (alpha * weight * local_interf_per_ue).sum(dim=1).mean()
+
+    # sum_rate = torch.sum(local_rate, dim=1)
+
+    # loss = - sum_rate.mean()
 
     return loss, sum_rate_detach
 
@@ -1601,7 +1615,7 @@ def loss_function_sumrate(graphData, nodeFeatDict, edgeDict, clientResponse, bot
 
 def fl_train_sumrate(
         dataLoader, responseInfo, globalRates, interferences, model, optimizer,
-        tau, rho_p, rho_d, num_antenna, round_ratio=0
+        tau, rho_p, rho_d, num_antenna, round_ratio=0, alpha=None
 ):
     """
     Train a local FL model for one epoch.
@@ -1632,7 +1646,7 @@ def fl_train_sumrate(
             batch, x_dict, attr_dict, response, global_rate,
             tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
             # epochRatio=epochRatio,
-            round_ratio=round_ratio,
+            round_ratio=round_ratio, alpha=alpha,
             responsibility=interference,
         )
 
@@ -1712,3 +1726,353 @@ def fl_eval_sumrate(
     sum_rate = torch.sum(rate, dim=1)
 
     return sum_rate
+
+def server_return_sumrate(dataLoader, globalInformation, num_antenna=1):
+    num_client = len(globalInformation)
+    response_all = []
+
+    for batch_idx, (all_loader, all_response) in enumerate(zip(zip(*dataLoader), zip(*globalInformation))):
+        aug_batch_list = []
+        all_client_embeddings = [r['UE'] for r in all_response]
+        all_AP_embeddings = [r['AP'] for r in all_response]
+        all_edge_embeddings = [r['edge_down'] for r in all_response]
+
+        all_DS = [r['DS'][:,0,:] for r in all_response] # [B, num_client, K]
+        all_PC = [r['PC'][:,0,:,:] for r in all_response] # [B, num_client, K]
+        all_UI = [r['UI'][:,0,:,:] for r in all_response] # [B, num_client, K]
+
+
+        if not all(x.shape == all_client_embeddings[0].shape for x in all_client_embeddings):
+            raise RuntimeError(f"Batch {batch_idx}: Mismatch in UE counts between clients. Cannot stack.")
+        
+        ## Calculate rate
+        all_DS_stack = torch.stack(all_DS, dim=1)
+        all_PC_stack = torch.stack(all_PC, dim=1)
+        all_UI_stack = torch.stack(all_UI, dim=1)
+        global_rate = rate_from_component(all_DS_stack, all_PC_stack, all_UI_stack, numAntenna=num_antenna)
+        # min_rate_per_sample, bottleneck_ue_idx = torch.min(global_rate, dim=1)
+
+        ### New
+        global_mean = global_rate.mean(dim=1, keepdim=True)  # [B, 1]
+        global_min = global_rate.min(dim=1, keepdim=True).values  # [B, 1]
+        ###
+        temperature = 2
+        bottleneck_indicator_mtx = F.softmax(-global_rate / temperature, dim=1)
+        bottleneck_indicator = bottleneck_indicator_mtx.reshape(-1,1)
+
+        rank_indices = torch.argsort(torch.argsort(global_rate, dim=1), dim=1)
+        normalized_rank = rank_indices.float() / (global_rate.shape[1] - 1)
+        normalized_rank = normalized_rank.reshape(-1, 1)
+
+        # Total DS across all APs for contribution ratio
+        total_DS = all_DS_stack.sum(dim=1)  # [B, K]
+        total_Interf = (all_PC_stack.sum(dim=2) + all_UI_stack.sum(dim=2)).sum(dim=1) # [B, K]
+
+        global_ue_context = torch.sum(torch.stack(all_client_embeddings), dim=0)
+
+        all_interf_stack = torch.stack(
+            [(all_PC[j] + all_UI[j]).sum(dim=1) for j in range(num_client)],
+            dim=1
+        )  # [B, num_client, K]
+        total_interf_per_ue = all_interf_stack.sum(dim=1)
+
+        for client_id, (_, batch) in enumerate(zip(all_response, all_loader)):
+            responsibility_k = all_interf_stack[:, client_id, :] / (total_interf_per_ue + 1e-9)  # [B, K]
+            other_AP_indices = list(range(client_id)) + list(range(client_id + 1, num_client))
+
+            ## DS, PC, UI
+            other_DS = torch.stack(all_DS[:client_id] + all_DS[client_id+1:], dim=1)
+            other_PC = torch.stack(all_PC[:client_id] + all_PC[client_id+1:], dim=1).sum(dim=2)
+            other_UI = torch.stack(all_UI[:client_id] + all_UI[client_id+1:], dim=1).sum(dim=2)
+
+            # ### New
+            gap_wo_features = []
+            wo_mean = []
+            wo_min = []
+            for each_other in other_AP_indices:
+                wo_other_DS = torch.stack(all_DS[:each_other] + all_DS[each_other+1:], dim=1)
+                wo_other_PC = torch.stack(all_PC[:each_other] + all_PC[each_other+1:], dim=1)#.sum(dim=2)
+                wo_other_UI = torch.stack(all_UI[:each_other] + all_UI[each_other+1:], dim=1)#.sum(dim=2)
+
+                without_rate = rate_from_component(wo_other_DS, wo_other_PC, wo_other_UI, numAntenna=num_antenna)
+
+                without_mean = without_rate.mean(dim=1)  # [B, 1]
+                without_min = without_rate.min(dim=1).values  # [B, 1]
+                wo_mean.append(without_mean)
+                wo_min.append(without_min)
+                gap_wo_features.append(torch.stack([without_mean, without_min], dim=-1))
+            gap_wo_features = torch.stack(gap_wo_features, dim=1)
+            wo_mean = torch.stack(wo_mean, dim=1)
+            wo_min = torch.stack(wo_min, dim=1)
+            ###
+            # Rate pack from other APs (DC, PC, UI)
+            other_pack = []
+            keys_needed = ['DS', 'PC', 'UI']
+            for j in range(num_client):
+                if j != client_id:
+                    full_data = all_response[j]
+                    filtered_data = {k: full_data[k] for k in keys_needed}
+                    other_pack.append(filtered_data)
+
+            aug_batch = batch.clone()
+            device = aug_batch['UE'].x.device
+
+            ########### Start
+            # GAP 
+            other_AP = torch.stack(all_AP_embeddings[:client_id] + all_AP_embeddings[client_id+1:], dim=1)
+            num_batch, num_other_AP, feat_dim = other_AP.shape
+
+            # # Enhance the GAP node feature
+            gap_total_DS = other_DS.sum(dim=2) # [B, num_GAP]
+
+            # # Per-GAP total interference: [B, num_GAP]  
+            gap_total_interf = (other_PC + other_UI).sum(dim=2)   # [B, num_GAP]
+
+            # # Per-GAP load (signal-to-interference ratio)
+            gap_load = gap_total_DS / (gap_total_interf + 1e-6)  # [B, num_GAP]
+
+            # # Concatenate to GAP features
+            # print(wo_mean.shape)
+            # # print(wo_min.shape)
+
+            ## Skip GAP 
+            num_GAP = num_other_AP // 2  ########################################################################################
+            w = bottleneck_indicator_mtx.to(device)              # [B, K]
+            lambda_I = 1.0
+            score_I = ((other_PC + other_UI) * w.unsqueeze(1)).sum(dim=2)  # [B, num_GAP]
+            score_S = (other_DS * w.unsqueeze(1)).sum(dim=2)               # [B, num_GAP]
+            score = score_S + lambda_I * score_I
+            top_idx = torch.topk(score, k=num_GAP, dim=1).indices   
+
+            other_AP = other_AP.gather(
+                dim=1,
+                index=top_idx.unsqueeze(-1).expand(-1, -1, feat_dim)
+            )  # [B, L, feat_dim]
+            ##
+
+            # gap_features = torch.cat([
+            #     other_AP.reshape(num_batch, num_GAP, feat_dim),  # [B, num_GAP, feat_dim]
+            #     # gap_total_DS.unsqueeze(-1),    # [B, num_GAP, 1]
+            #     # gap_total_interf.unsqueeze(-1), # [B, num_GAP, 1]
+            #     # gap_load.unsqueeze(-1)          # [B, num_GAP, 1]
+            #     # (wo_mean/global_mean.expand(-1, num_GAP))[:,:,None], # This and the below are shit, limite to 1.28
+            #     # (wo_min/global_min.expand(-1, num_GAP))[:,:,None],
+            #     # gap_wo_features # Decrease the performance
+            # ], dim=-1).reshape(-1, feat_dim + 0)
+
+            gap_features = other_AP.reshape(-1, feat_dim)
+
+            aug_batch['GAP'].x = gap_features.to(device)
+
+            # GAP - AP
+            ap_indices = torch.arange(num_batch, device=device).repeat_interleave(num_GAP)
+            gap_indices = torch.arange(num_batch * num_GAP, device=device)
+            edge_index_inteference = torch.stack([gap_indices, ap_indices], dim=0)
+            edge_index_inteference_back = torch.stack([ap_indices, gap_indices], dim=0)
+
+            other_edge = torch.stack(all_edge_embeddings[:client_id] + all_edge_embeddings[client_id+1:], dim=1)
+            num_total_ue, _, edge_feat_dim = other_edge.shape
+            num_ue_per_graph = num_total_ue // num_batch
+            edge_reshaped = other_edge.reshape(num_batch, num_ue_per_graph, num_other_AP, edge_feat_dim)
+
+            edge_reshaped = edge_reshaped.gather(
+                dim=2,
+                index=top_idx.unsqueeze(1).unsqueeze(-1).expand(-1, num_ue_per_graph, -1, edge_feat_dim)
+            )  # [B, num_ue_per_graph, L, edge_feat_dim]
+            # edge_summed = edge_reshaped.mean(dim=1) # sum or mean
+            # edge_attr_inteference = edge_summed.reshape(-1, feat_dim)
+
+            ## Choose what to keep in from each GAP-UE links to only 1 GAP-AP link
+            
+            # ##### New #2
+            # B, K, G, E = edge_reshaped.shape
+            # Kb = min(8, K)          # candidate bottleneck UEs
+            # Xg = 2                  # top helpers per GAP
+            # Xb = 2                  # top interferers per GAP
+
+            # # 1) candidate UEs = bottom-Kb by global_rate (stable)
+            # cand_u = torch.topk(-global_rate, k=Kb, dim=1).indices          # [B, Kb]
+
+            # # Gather DS / Interf for candidates
+            # cand_u_exp = cand_u[:, None, :].expand(-1, G, -1)               # [B, G, Kb]
+            # DS_cand = other_DS.gather(2, cand_u_exp)                        # [B, G, Kb]
+            # I_cand  = (other_PC + other_UI).gather(2, cand_u_exp)           # [B, G, Kb]
+
+            # # Gather edge embeddings for candidates
+            # edge_BGKE = edge_reshaped.permute(0, 2, 1, 3)                   # [B, G, K, E]
+            # edge_cand = edge_BGKE.gather(
+            #     2, cand_u[:, None, :, None].expand(-1, G, -1, E)
+            # )  # [B, G, Kb, E]
+
+            # # 2) pick top-Xg helpers and top-Xb interferers within candidate set
+            # idx_good = torch.topk(DS_cand, k=min(Xg, Kb), dim=2).indices     # [B, G, Xg]
+            # idx_bad  = torch.topk(I_cand,  k=min(Xb, Kb), dim=2).indices     # [B, G, Xb]
+
+            # # 3) gather corresponding edge embeddings
+            # edges_good = edge_cand.gather(2, idx_good[..., None].expand(-1, -1, -1, E))  # [B,G,Xg,E]
+            # edges_bad  = edge_cand.gather(2, idx_bad[...,  None].expand(-1, -1, -1, E))  # [B,G,Xb,E]
+
+            # # 4) pool (mean or max) => fixed-size representation
+            # edge_good_pool = edges_good.mean(dim=2)     # [B, G, E]
+            # edge_bad_pool  = edges_bad.mean(dim=2)      # [B, G, E]
+
+            # edge_attr_inteference = torch.cat([edge_good_pool, edge_bad_pool],dim=-1).reshape(-1, 2*edge_feat_dim + 2)
+
+
+            ##### New #1
+            X = 2               # top links per sign
+            B_top = 2           # top bottleneck UEs to consider
+            
+            # 1) restrict to most bottleneck UEs (scalable)
+            w = bottleneck_indicator_mtx.to(device)                        # [B, K]
+            k_b = min(B_top, w.shape[1])
+            ue_idx = torch.topk(w, k=k_b, dim=1).indices                  # [B, k_b]
+
+            # gather DS/interference on bottleneck UE subset
+            idx_bgk = ue_idx.unsqueeze(1).expand(-1, num_GAP, -1)         # [B,G,k_b]
+            ds_b = torch.gather(other_DS, dim=2, index=idx_bgk)           # [B,G,k_b]
+            itf_b = torch.gather(other_PC + other_UI, dim=2, index=idx_bgk)  # [B,G,k_b]
+
+            # 2) top-X "good" and "bad" links for each GAP
+            k_x = min(X, k_b)
+            good_idx_local = torch.topk(ds_b, k=k_x, dim=2).indices       # [B,G,k_x]
+            bad_idx_local  = torch.topk(itf_b, k=k_x, dim=2).indices      # [B,G,k_x]
+
+            # map local idx (within bottleneck subset) -> true UE idx
+            ue_idx_bgk = idx_bgk
+            good_ue_idx = torch.gather(ue_idx_bgk, 2, good_idx_local)     # [B,G,k_x]
+            bad_ue_idx  = torch.gather(ue_idx_bgk, 2, bad_idx_local)      # [B,G,k_x]
+
+            # 3) gather edge features and pool
+            edge_bguf = edge_reshaped.permute(0, 2, 1, 3)                 # [B,G,U,F]
+            good_feat = torch.gather(
+                edge_bguf, 2, good_ue_idx.unsqueeze(-1).expand(-1,-1,-1,edge_feat_dim)
+            )                                                              # [B,G,k_x,F]
+            bad_feat = torch.gather(
+                edge_bguf, 2, bad_ue_idx.unsqueeze(-1).expand(-1,-1,-1,edge_feat_dim)
+            )                                                              # [B,G,k_x,F]
+
+            # weighted pool (better than plain mean)
+            good_w = torch.softmax(torch.gather(ds_b, 2, good_idx_local), dim=2).unsqueeze(-1)
+            bad_w  = torch.softmax(torch.gather(itf_b, 2, bad_idx_local), dim=2).unsqueeze(-1)
+            pool_good = (good_feat * good_w).sum(dim=2)                   # [B,G,F]
+            pool_bad  = (bad_feat * bad_w).sum(dim=2)                     # [B,G,F]
+
+            # keep same interface size as current (2F)
+            edge_attr_inteference = torch.cat([pool_good, pool_bad], dim=-1).reshape(-1, edge_feat_dim * 2)
+            ##### Old
+            # edge_mean = edge_reshaped.mean(dim=1)
+            # edge_max = edge_reshaped.max(dim=1)[0]
+            # # edge_std = edge_reshaped.std(dim=1)
+
+            # edge_attr_inteference = torch.cat([edge_mean, edge_max], dim=-1).reshape(-1, edge_feat_dim*2)
+
+            aug_batch['GAP', 'cross', 'AP'].edge_index = edge_index_inteference
+            aug_batch['GAP', 'cross', 'AP'].edge_attr = edge_attr_inteference
+
+            aug_batch['AP', 'cross-back', 'GAP'].edge_index = edge_index_inteference_back
+            aug_batch['AP', 'cross-back', 'GAP'].edge_attr = edge_attr_inteference
+
+            ## GAP - UE edge (selective: top bottleneck UEs only)
+            B_top = 1 #num_ue_per_graph//2  # selective: only top-2 bottleneck UEs  # 1 UE is shiet, 2 is worse than all?
+            K = num_ue_per_graph
+
+            # 1) Select top-B_top bottleneck UEs
+            w = bottleneck_indicator_mtx.to(device)          # [B, K]
+            ue_top_idx = torch.topk(w, k=B_top, dim=1).indices  # [B, B_top]
+
+            # 2) Filter DS/interference for selected GAPs (top_idx) and selected UEs (ue_top_idx)
+            ds_filtered   = other_DS.gather(1, top_idx.unsqueeze(-1).expand(-1, -1, K))     # [B, num_GAP, K]
+            itf_filtered  = (other_PC + other_UI).gather(1, top_idx.unsqueeze(-1).expand(-1, -1, K))  # [B, num_GAP, K]
+
+            # Gather at selected UEs: [B, num_GAP, B_top]
+            ds_sel  = ds_filtered.gather(2, ue_top_idx.unsqueeze(1).expand(-1, num_GAP, -1))
+            itf_sel = itf_filtered.gather(2, ue_top_idx.unsqueeze(1).expand(-1, num_GAP, -1))
+
+            # 3) Edge features [B, num_GAP, B_top, F+2] → [B*G*B_top, F+2]
+            edge_bgkf = edge_reshaped.permute(0, 2, 1, 3)    # [B, num_GAP, K, F]
+            edge_bgkf_sel = edge_bgkf.gather(
+                2, ue_top_idx.unsqueeze(1).unsqueeze(-1).expand(-1, num_GAP, -1, edge_feat_dim)
+            )  # [B, num_GAP, B_top, F]
+
+            edge_attr_gap_ue = torch.cat([
+                edge_bgkf_sel,
+                ds_sel.unsqueeze(-1),
+                itf_sel.unsqueeze(-1)
+            ], dim=-1).reshape(-1, edge_feat_dim + 2)          # [B*G*B_top, F+2]
+
+            # 4) Edge index: GAP_g → UE_k
+            b_ids = torch.arange(num_batch, device=device)
+            gap_global = (b_ids.unsqueeze(1) * num_GAP + torch.arange(num_GAP, device=device))  # [B, G]
+            ue_global  = b_ids.unsqueeze(1) * K + ue_top_idx                        # [B, B_top]
+
+            gap_src = gap_global.unsqueeze(2).expand(-1, -1, B_top).reshape(-1)     # [B*G*B_top]
+            ue_dst  = ue_global.unsqueeze(1).expand(-1, num_GAP, -1).reshape(-1)          # [B*G*B_top]
+
+            aug_batch['GAP', 'serves', 'UE'].edge_index = torch.stack([gap_src, ue_dst], dim=0)
+            aug_batch['GAP', 'serves', 'UE'].edge_attr  = edge_attr_gap_ue
+
+
+            ########### End
+
+            # Global UE context (from other APs)
+            new_ue_features = ((global_ue_context - all_client_embeddings[client_id]) / (num_client - 1)).to(device)
+
+            # Contribution ratio: how much this AP contributes to each UE's signal
+            local_DS = all_DS[client_id]  # [B, K]
+            contribution_ratio = (local_DS / (total_DS + 1e-6)).reshape(-1, 1)  # [B*K, 1]
+            # log_rate_context = torch.log10(min_rate_per_sample + 1e-9).reshape(-1, 1).repeat(num_ue_per_graph, 1)
+
+            # ap_conditioned_bottleneck = bottleneck_indicator * contribution_ratio
+
+            # Context A: Global Embedding
+            new_ue_features = ((global_ue_context - all_client_embeddings[client_id]) / (num_client - 1)).to(device)
+            
+            # Context B: Signal Contribution (My Signal / Total Signal)
+            local_DS = all_DS[client_id]
+            contribution_ratio = (local_DS / (total_DS + 1e-9)).reshape(-1, 1)
+            
+            # Context C: Interference Share (My Interference / Total Interference)
+            # **CRITICAL NEW FEATURE**
+            local_interf = (all_PC[client_id] + all_UI[client_id]).sum(dim=2)
+            interference_share = (local_interf / (total_Interf + 1e-9)).reshape(-1, 1)
+
+            # Context D: Global Quality (Log SINR)
+            # **CRITICAL NEW FEATURE**
+            # Tells the UE if it is in a "high power" or "low power" regime globally
+            global_sinr = (2 ** global_rate - 1).reshape(-1, 1)
+
+            global_sinr_val = (2 ** global_rate - 1)
+            interference_sensitivity = (global_sinr_val / ((total_Interf + 1e-9) * (1 + global_sinr_val)))
+            gradient_penalty = (interference_sensitivity * bottleneck_indicator_mtx).reshape(-1, 1)
+
+
+            aug_batch['UE'].x = torch.cat(
+                [
+                    aug_batch['UE'].x, # init dim
+                    new_ue_features,   # out_channel
+                    bottleneck_indicator,    # [Focus: Soft attention]
+                    # normalized_rank,         # [Focus: Hard priority] <--- NEW
+                    contribution_ratio,      # [Action: How much I help]
+                    interference_share,      # [Action: How much I hurt] <--- NEW
+                    global_sinr,             # [State: How good is the user globally] <--- NEW
+                    # gradient_penalty
+                ],
+                dim=-1
+            )
+
+            # current_edge_attr = aug_batch['AP', 'down', 'UE'].edge_attr
+            # aug_batch['AP', 'down', 'UE'].edge_attr = torch.cat(
+            #     [current_edge_attr, interference_share.to(device)], 
+            #     dim=-1
+            # )
+
+            client_data = {
+                'loader': aug_batch,
+                'rate_pack': other_pack,
+                'global_rate': bottleneck_indicator_mtx,
+                'responsibility': responsibility_k.to(device)
+            }
+            aug_batch_list.append(client_data)
+        response_all.append(aug_batch_list)
+    return response_all

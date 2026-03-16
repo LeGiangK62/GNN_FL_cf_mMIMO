@@ -82,3 +82,12 @@ Mr. Le Tung GIANG - tung.giangle99@gmail.com or giang.lt2399144@pusan.ac.kr
 ### Sumrate: 
 ### How to not using the DS/PC/UI in calculating the loss
 ### Currently, only local rate -> not goods
+
+
+## Current best for sumrate
+```bash
+python main_sumrate.py --num_train 200 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 128 --num_gnn_layers 5 --cen_pretrain 26_03_08_15_10_07_cen --num_epochs 1 --num_rounds 100 --batch_size 32 --lr 1e-4  --client_fraction 0.6 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.19
+```
+
+Save FL GNN to results/sumrate/models//26_03_12_11_41_45_fl.pth.
+Sum rate avg: GNN 11.85 - FL GNN 11.56 - 97.54%
