@@ -1603,10 +1603,19 @@ def loss_function_sumrate(graphData, nodeFeatDict, edgeDict, clientResponse, bot
         ## 0.2 -> 11.1050,  0.21 -> 11.10, 0.25 -> 10.91, 0.3 -> 10.42, 0.35 -> 9.717, 0.5 ->  6.58, 1 -> 0.004 
     # before reshape 0.01 -> 9.27, 0.05 -> 10.00, 0.1 -> 10.71, 0.2-> 11.18, 0.5 -> 8
 
+    # Current best
     loss = -(weight * DS_k).sum(dim=1).mean() + (alpha * weight * local_interf_per_ue).sum(dim=1).mean()
-
+    # loss = -(weight * local_rate).sum(dim=1).mean()
     # sum_rate = torch.sum(local_rate, dim=1)
 
+    # 2nd option
+    # contribution_ratio = graphData['UE'].x[:,-3:-2].reshape(num_graphs, num_UEs).unsqueeze(1)  # [-3]
+    # interference_share = graphData['UE'].x[:,-2:-1].reshape(num_graphs, num_UEs).unsqueeze(1)  # [-2]
+    # weight_ds    = weight * contribution_ratio   # [B, 1, K]
+    # weight_interf = weight * interference_share  # [B, 1, K]
+
+    # loss = -(weight_ds * DS_k).sum(dim=1).mean() \
+    #     + (alpha * weight_interf * local_interf_per_ue).sum(dim=1).mean()
     # loss = - sum_rate.mean()
 
     return loss, sum_rate_detach

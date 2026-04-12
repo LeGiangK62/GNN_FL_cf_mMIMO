@@ -37,9 +37,9 @@ def parse_args():
 
     # Centralized hyperparameters
     parser.add_argument('--cen_lr', type=float, default=5e-3, help="Centralized learning rate")
-    parser.add_argument('--num_epochs_cen', type=int, default=1000, help="Number of Centralized training epochs")
+    parser.add_argument('--num_epochs_cen', type=int, default=50, help="Number of Centralized training epochs")
     parser.add_argument('--cen_pretrain', type=str, default=None, help="Name of model to load directly without training")
-    parser.add_argument('--cen_hidden_channels', type=int, default=64, help="Number of hidden channels for centralized GNN")
+    parser.add_argument('--cen_hidden_channels', type=int, default=32, help="Number of hidden channels for centralized GNN")
     parser.add_argument('--cen_num_gnn_layers', type=int, default=3, help="Number of centralized GNN layers")
     
     
@@ -57,6 +57,12 @@ def parse_args():
     parser.add_argument('--is_edge_update', type=bool, default=True, help="Whether to perform edge update")
     parser.add_argument('--hidden_channels', type=int, default=32, help="Number of hidden channels for GNN")
     parser.add_argument('--num_gnn_layers', type=int, default=4, help="Number of GNN layers")
+
+
+    # Quantum Parameters
+    parser.add_argument('--n_qubits', type=int, default=5, help="Number of quantum bit (qubits)")
+    parser.add_argument('--n_layers', type=int, default=2, help="Number of hidden channels for Quantum layers")
+    parser.add_argument('--q_dev', type=str, default="default.qubit", help="Number of GNN layers")
     
     # Seed for reproducibility
     parser.add_argument('--seed', type=int, default=1712, help="Random seed")

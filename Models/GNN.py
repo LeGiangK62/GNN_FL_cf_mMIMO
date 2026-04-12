@@ -553,19 +553,11 @@ class APHetNetFL_sumrate(nn.Module):
 
         self.out_channels = out_channels
 
-
-
         ##
         src_dim_dict_gap = dim_dict.copy()
         src_dim_dict_gap['GAP'] = 0
         src_dim_dict_gap['AP'] = src_dim_dict['AP']
         src_dim_dict_gap['edge'] = 0
-        
-
-        ##
-        # self.convs_pre = self.create_conv_block(out_channels, out_channels, self.edge_dim, out_channels, src_dim_dict, num_layers)  
-        # self.convs_pre = self.create_conv_block(out_channels, out_channels, self.edge_dim, out_channels, src_dim_dict, num_layers-1)  
-        # self.convs_aug = self.create_conv_block(out_channels, out_channels, out_channels, out_channels, src_dim_dict, num_layers-1)  
 
         ### UE <-> AP
         self.convs_pre = torch.nn.ModuleList()
@@ -610,19 +602,6 @@ class APHetNetFL_sumrate(nn.Module):
             out_channels, src_dim_dict_gap,
             [('GAP', 'cross', 'AP'), ('AP', 'cross-back', 'GAP')]
         ))
-
-        #####
-
-
-        # ### GAP <-> UE
-        # self.conv_gap_ue = APConvLayer(
-        #     {'GAP': out_channels, 'UE': out_channels},
-        #     GAP_UE_edge + 2,           # F+2
-        #     out_channels, src_dim_dict_gap,
-        #     [('GAP', 'serves', 'UE')]
-        # )
-        
-        ###
 
         ### AP -> UE, then AP <-> UE
         self.convs_post = torch.nn.ModuleList()
@@ -685,8 +664,6 @@ class APHetNetFL_sumrate(nn.Module):
         tmp = x_dict['UE'] 
         if isRawData:
             tmp = self.ue_encoder_raw(x_dict['UE'] )
-            # aug_ue = torch.zeros(x_dict['UE'].shape[0], self.out_channels - self.ue_dim, device=x_dict['UE'].device)
-        # else:
         aug_ue = self.ue_encoder_aug(tmp)
 
         x_dict['UE'] = torch.cat(
@@ -701,20 +678,12 @@ class APHetNetFL_sumrate(nn.Module):
         if not isRawData:
             for conv in self.convs_gap:
                 x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
-            # x_dict, edge_attr_dict = self.conv_gap_ue(x_dict, edge_index_dict, edge_attr_dict)
-        
 
         # AP <-> UE
         for conv in self.convs_post:
             x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
 
         edge_power = self.power_edge(edge_attr_dict[('AP', 'down', 'UE')])
-        # if not isRawData:
-        #     edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
-        #         [edge_attr_dict[('AP', 'down', 'UE')][:,:self.edge_dim], edge_power], 
-        #         dim=1
-        #     )
-        # else:
         edge_attr_dict[('AP', 'down', 'UE')] = torch.cat(
             [edge_attr_dict[('AP', 'down', 'UE')][:,:-1], edge_power], 
             dim=1

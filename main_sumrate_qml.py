@@ -1,6 +1,7 @@
 import time
 import os
 # os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+import pennylane as qml
 
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
@@ -12,7 +13,9 @@ import numpy as np
 import scipy.io
 from Utils.data_gen import build_cen_loader, build_decen_loader
 
-from Models.GNN import APHetNet, APHetNetFL_sumrate as APHetNetFL
+from Models.GNN import APHetNet #, APHetNetFL_sumrate as APHetNetFL
+
+from Models.qml import APHetNetFL_qml as APHetNetFL
 from Utils.args import parse_args
 from Utils.centralized_train import cen_eval_sumrate, cen_train_sumrate, cen_loss_function_sumrate
 # from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
@@ -46,6 +49,8 @@ def lr_factor(round_idx, warmup_rounds, gamma):
 
 
 if __name__ == '__main__':
+    # quantum part
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -53,6 +58,9 @@ if __name__ == '__main__':
     init_folder()
     
     args = parse_args()
+    n_qubits = args.n_qubits # 8 is not good as 5
+    n_layers = args.n_layers
+    q_dev = qml.device(args.q_dev, wires=n_qubits)
     seed = args.seed
     
     # trainin param
@@ -217,6 +225,7 @@ if __name__ == '__main__':
         aug_feat_dim=aug_ue_dim,  # DS, PC, UI, rate_without_me + 3?
         num_layers=num_gnn_layers,
         hid_layers=hidden_channels//2,
+        q_dev=q_dev, n_qubits=n_qubits, n_layers=n_layers,
     ).to(device)
 
     global_optimizer = torch.optim.AdamW(global_model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
@@ -235,7 +244,7 @@ if __name__ == '__main__':
             aug_feat_dim=aug_ue_dim,
             num_layers=num_gnn_layers,
             hid_layers=hidden_channels//2,
-            isDecentralized=False
+            q_dev=q_dev, n_qubits=n_qubits, n_layers=n_layers,
         ).to(device)
         model.load_state_dict(global_model.state_dict())
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
@@ -366,7 +375,7 @@ if __name__ == '__main__':
         end_time = time.time()
         execution_time = end_time - start_time
         print(f"Execution Time: {timedelta(seconds=execution_time)}")
-        fl_model_filename = f'{MODEL_DIR}/{timestamp}_fl.pth'
+        fl_model_filename = f'{MODEL_DIR}/{timestamp}_fl_qml.pth'
         torch.save(global_model.state_dict(), fl_model_filename)
         print(f'Save FL GNN to {fl_model_filename}.')
 
@@ -378,7 +387,7 @@ if __name__ == '__main__':
         plt.axhline(y=np.mean(rates_log_solutions[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
         plt.xlabel('Rounds', fontsize=12)
         plt.ylabel('Rate', fontsize=12)
-        plt.title(f'{args.fl_scheme.upper()}  GNN Training Rate Curve - {args.lr}_{args.num_rounds}', fontsize=14)
+        plt.title(f'{args.fl_scheme.upper()}  GNN Training Rate Curve - {n_qubits}_{n_layers}', fontsize=14)
         plt.grid(True, linestyle='--', alpha=0.6)
         plt.legend()
         plt.tight_layout()
@@ -531,7 +540,7 @@ if __name__ == '__main__':
 
 
 
-print(f'Circuit 6')
+print(f'Reshape weight alpha {args.alpha}')
 
 ## Todo: Check on the benchmark
 # Try not using the DS/PC/UI when local training (using MLP to predict using GAP feature)

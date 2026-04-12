@@ -66,6 +66,9 @@ python FlGrad.py --num_train 2000 --num_test 500 --num_eval 500 --num_ap 30 --nu
 ```bash
 python FlGrad.py --num_train 200 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --cen_pretrain 01_14_19_18_18_cen --hidden_channels 128 --num_gnn_layers 5 --num_epochs 1 --num_rounds 250 --batch_size 32 --lr 1e-4  --client_fraction 0.6 --server_lr 0.05 --eval_plot --fl_scheme scaffold  --comm
 _rounds 2
+
+For qml of the strongly ent
+python main_sumrate_qml.py --num_train 100 --num_test 500 --num_eval 1000 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 128 --num_gnn_layers 5   --num_epochs 1 --num_rounds 150 --batch_size 32 --lr 5e-4  --client_fraction 0.6 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.2 --n_qubits 5 --n_layers 3
 ```
 
 ---
@@ -85,9 +88,9 @@ Mr. Le Tung GIANG - tung.giangle99@gmail.com or giang.lt2399144@pusan.ac.kr
 
 
 ## Current best for sumrate
+Save FL GNN to results/sumrate/models//26_03_17_11_27_15_fl.pth.
+Evaluation====================
+Sum rate avg: GNN 11.92 - FL GNN 11.68 - 97.98%
 ```bash
-python main_sumrate.py --num_train 200 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 128 --num_gnn_layers 5 --cen_pretrain 26_03_08_15_10_07_cen --num_epochs 1 --num_rounds 100 --batch_size 32 --lr 1e-4  --client_fraction 0.6 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.19
+python main_sumrate.py --num_train 500 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 128 --num_gnn_layers 5 --cen_pretrain 26_03_08_15_10_07_cen --num_epochs 1 --num_rounds 150 --batch_size 32 --lr 1e-4  --client_fraction 1.0 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.2
 ```
-
-Save FL GNN to results/sumrate/models//26_03_12_11_41_45_fl.pth.
-Sum rate avg: GNN 11.85 - FL GNN 11.56 - 97.54%
