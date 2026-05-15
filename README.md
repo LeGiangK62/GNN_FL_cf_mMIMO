@@ -52,6 +52,17 @@ pip install -r requirements.txt
 │                                                             │
 │  4. FedAvg aggregates weights                               │
 └─────────────────────────────────────────────────────────────┘
+## Data generation
+
+for Downlink sumrate: running run_gen_sumrate.m
+requirement: 
+---dl_approx_sumrate.m
+---dl_fractional_pa.m
+---dl_rate_calculate.m
+---dl_sinr_calculate.m
+---dl_sinr_component_calculate.m
+---downlink_sumrate_data.m
+---log_approximation.m
 
 
 ## Running command

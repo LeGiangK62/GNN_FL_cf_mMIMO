@@ -531,7 +531,7 @@ if __name__ == '__main__':
 
 
 
-print(f'Circuit 6')
+print(f' Fixed Circuit 6')
 
 ## Todo: Check on the benchmark
 # Try not using the DS/PC/UI when local training (using MLP to predict using GAP feature)

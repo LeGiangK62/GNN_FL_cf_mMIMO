@@ -54,9 +54,13 @@ def make_circuit_6(n_qubits: int, n_layers: int, q_dev):
 
     @qml.qnode(dev, interface="torch")
     def circuit_6(inputs, weights):
+        qml.AmplitudeEmbedding(inputs, wires=range(n_qubits), normalize=True, pad_with=0.0)
         # Encoding: RX + RZ with input angles (supports batched inputs)
-        qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="X")
-        qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Z")
+        # qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="X")
+        # qml.AngleEmbedding(inputs, wires=range(n_qubits), rotation="Z")
+        for i in range(n_qubits):
+            qml.RX(weights[n_layers + 2, i], wires=i)
+            qml.RZ(weights[n_layers + 3, i], wires=i)
 
         # Variational layers: RX rotations + ring CNOT entanglement
         for l in range(n_layers):
@@ -74,9 +78,9 @@ def make_circuit_6(n_qubits: int, n_layers: int, q_dev):
 
         return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
-    in_dim = n_qubits
+    in_dim = 2**n_qubits
     out_dim = n_qubits
-    weight_shape = {"weights": (n_layers + 2, n_qubits)}
+    weight_shape = {"weights": (n_layers + 2 + 2, n_qubits)}
     return circuit_6, weight_shape, in_dim, out_dim
 
 
@@ -174,6 +178,7 @@ class APConvLayer_qml(MessagePassing):
 
             # Change the type of circuit here 
             # TODO: Try the Circuit 6 here
+            # circuit, weight_shape, in_dim, out_dim = make_pqc(n_qubits, n_layers, q_dev)
             circuit, weight_shape, in_dim, out_dim = make_circuit_6(n_qubits, n_layers, q_dev)
             
             self.msg[src_type] = Seq(
