@@ -16,6 +16,12 @@ def parse_args():
     parser.add_argument('--power_f', type=float, default=0.2, help="Transmit power threshold")
     parser.add_argument('--D', type=float, default=1, help="Area diameters (km)")
     parser.add_argument('--num_antenna', type=int, default=1, help="Number of antennas per AP")
+
+    # ISAC parameters
+    parser.add_argument('--num_sr', type=int, default=2, help="Number of sensing receivers")
+    parser.add_argument('--num_tar', type=int, default=1, help="Number of sensing targets")
+    parser.add_argument('--nu', type=float, default=1, help="Sensing resolution (m2)")
+
     
     # Hyperparameters
     parser.add_argument('--norm_scheme', type=str, choices=['z_score', 'no', 'min_max'], default='z_score', help="Data normalization scheme")

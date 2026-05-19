@@ -71,13 +71,13 @@ def Generate_Input(num_H, tau, K, M, Pd, D=1, Hb=15, Hm=1.65, f=1900,
 # ========
 # 3. Graph Utilities 
 
-def get_cg(n):
-    adj = []
-    for i in range(0,n):
-        for j in range(0,n):
-            if(not(i==j)):
-                adj.append([i,j])
-    return adj
+# def get_cg(n):
+#     adj = []
+#     for i in range(0,n):
+#         for j in range(0,n):
+#             if(not(i==j)):
+#                 adj.append([i,j])
+#     return adj
 
 def create_graph(Beta_all, Gamma_all, Phi_all, type='het', isDecentralized=True):
     num_sample, num_AP, num_UE = Beta_all.shape
