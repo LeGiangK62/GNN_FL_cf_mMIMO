@@ -22,11 +22,11 @@ from Utils.fl_train import FedAvg, FedProx, SCAFFOLD
 
 
 
-SAVE_DIR = 'results'
-MODEL_DIR = "results/models/"
-EVAL_DIR = "results/eval/"
-FIG_DIR = "results/figs"
-TRAIN_DIR = "results/train/"
+SAVE_DIR = '.results'
+MODEL_DIR = ".results/models/"
+EVAL_DIR = ".results/eval/"
+FIG_DIR = ".results/figs"
+TRAIN_DIR = ".results/train/"
 
 def init_folder():
     os.makedirs(MODEL_DIR, exist_ok=True)

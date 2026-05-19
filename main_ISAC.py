@@ -22,7 +22,7 @@ from Utils.fl_train import FedAvg, FedProx
 
 
 
-SAVE_DIR = 'results/isac_sumrate'
+SAVE_DIR = '.results/isac_sumrate'
 MODEL_DIR = SAVE_DIR + "/models/"
 EVAL_DIR = SAVE_DIR + "/eval/"
 FIG_DIR = SAVE_DIR + "/figs"

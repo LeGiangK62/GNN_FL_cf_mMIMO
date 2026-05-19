@@ -4,7 +4,7 @@ import argparse
 def parse_args():
     parser = argparse.ArgumentParser(description="Federated Learning Script")
     
-    parser.add_argument('--pre_train', type=str, default=None, help="Path to pre trained model (insinde results/models/ folder, without '.pt')")
+    parser.add_argument('--pre_train', type=str, default=None, help="Path to pre trained model (insinde .results/models/ folder, without '.pt')")
     parser.add_argument("--eval_same_data", action="store_true", default=False, help="Eval on the same with training data.")
     parser.add_argument("--eval_plot", action="store_true", default=True, help="Eval Visualization (CDF)")
     

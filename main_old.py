@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 def parse_args():
     parser = argparse.ArgumentParser(description="Federated Learning Script")
     
-    parser.add_argument('--pre_train', type=str, default=None, help="Path to pre trained model (insinde results/models/ folder, without '.pt')")
+    parser.add_argument('--pre_train', type=str, default=None, help="Path to pre trained model (insinde .results/models/ folder, without '.pt')")
     parser.add_argument("--eval_same_data", action="store_true", default=True, help="Eval on the same with training data.")
     
     # System Parameters

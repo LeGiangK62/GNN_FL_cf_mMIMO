@@ -99,7 +99,7 @@ Mr. Le Tung GIANG - tung.giangle99@gmail.com or giang.lt2399144@pusan.ac.kr
 
 
 ## Current best for sumrate
-Save FL GNN to results/sumrate/models//26_03_17_11_27_15_fl.pth.
+Save FL GNN to .results/sumrate/models//26_03_17_11_27_15_fl.pth.
 Evaluation====================
 Sum rate avg: GNN 11.92 - FL GNN 11.68 - 97.98%
 ```bash
