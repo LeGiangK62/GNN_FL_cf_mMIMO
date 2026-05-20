@@ -103,5 +103,7 @@ Save FL GNN to .results/sumrate/models//26_03_17_11_27_15_fl.pth.
 Evaluation====================
 Sum rate avg: GNN 11.92 - FL GNN 11.68 - 97.98%
 ```bash
-python main_sumrate.py --num_train 500 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 128 --num_gnn_layers 5 --cen_pretrain 26_03_08_15_10_07_cen --num_epochs 1 --num_rounds 150 --batch_size 32 --lr 1e-4  --client_fraction 1.0 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.2
+python main_sumrate.py --num_train 500 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 128 --num_gnn_layers 5  --num_epochs 1 --num_rounds 150 --batch_size 32 --lr 1e-4  --client_fraction 1.0 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.2 --cen_pretrain 26_05_20_15_00_28_cen --fl_pretrain 26_05_20_15_00_28_fl
+
+python main_sumrate.py --num_train 500 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 64 --num_gnn_layers 3  --num_epochs 1 --num_rounds 150 --batch_size 32 --lr 1e-4  --client_fraction 1.0 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.2 
 ```

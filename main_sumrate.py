@@ -12,7 +12,8 @@ import numpy as np
 import scipy.io
 from Utils.data_gen import build_cen_loader, build_decen_loader
 
-from Models.GNN import APHetNet, APHetNetFL_sumrate as APHetNetFL
+from Models.GNN import APHetNet
+from Models.FedGNN import APHetNetFL_sumrate as APHetNetFL
 from Utils.args import parse_args
 from Utils.centralized_train import cen_eval_sumrate, cen_train_sumrate, cen_loss_function_sumrate
 # from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin

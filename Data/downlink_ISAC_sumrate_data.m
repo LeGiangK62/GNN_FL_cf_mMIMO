@@ -1,5 +1,5 @@
 function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, power_log, ...
-          rcs_values, ap_locations, sr_locations] = downlink_ISAC_sumrate_data(...
+          rcs_values, ap_locations, sr_locations, q_a_all, q_b_all, q_c_all] = downlink_ISAC_sumrate_data(...
           num_sam, num_ap, num_ue, num_sr, num_antenna, tau, power_f, ...
           Hb, Hm, f, d0, d1, D, nu)
 
@@ -56,6 +56,10 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
     sr_locations = zeros(N,T,2);
     rcs_values = zeros(N, M, T);  % RCS values for each AP-SR pair
     crlb_values = zeros(N, 2);     % CRLB for x and y localization
+
+    q_a_all = zeros(N, M, 1);
+    q_b_all = zeros(N, M, 1);
+    q_c_all = zeros(N, M, 1);
     
     % Sensing system parameters
     c = 3e8;  % speed of light [m/s]
@@ -470,6 +474,9 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
 
         ap_locations(n,:,:) = AP(:,:,1);
         sr_locations(n,:,:) = SR(:,:,1);
+        q_a_all(n,:,:) = q_a;
+        q_b_all(n,:,:) = q_b;
+        q_c_all(n,:,:) = q_c;
         
     end  % end sample loop
 

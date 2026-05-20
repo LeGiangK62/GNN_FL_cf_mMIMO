@@ -12,9 +12,10 @@ import numpy as np
 import scipy.io
 from Utils.isac_data import build_cen_loader_isac, build_decen_loader_isac
 
-from Models.GNN import APHetNet, APHetNetFL_sumrate as APHetNetFL
+from Models.GNN import IsacHetNet
+from Models.FedGNN import APHetNetFL_sumrate as APHetNetFL
 from Utils.args import parse_args
-from Utils.centralized_train import cen_eval_sumrate, cen_train_sumrate, cen_loss_function_sumrate
+from Utils.centralized_train import cen_eval_isac_sumrate, cen_train_isac_sumrate, cen_loss_function_isac_sumrate
 # from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
 
 from Utils.fl_train import fl_train_sumrate, get_global_info, fl_eval_sumrate, server_return_GAP, get_global_info_2nd
@@ -100,13 +101,20 @@ if __name__ == '__main__':
     nu = args.nu
     num_sr = args.num_sr
     num_tar = args.num_tar
+
+    c = 3e8  
+    sigma_s = 1e-3  
+    B_sens = 20 * 1e6  # 20MHz
+    zeta = np.pi * B_sens / (sigma_s * c)
+    zeta = zeta ** 2 * 8
     
     
     np.random.seed(seed)
     torch.manual_seed(seed)
     
     # Load data
-    file_name = f'dl_isac_sumrate_data_10_{num_ue}_{num_ap}'
+    file_name = f'noQ_dl_isac_sumrate_data_2000_{num_ue}_{num_ap}'
+    # file_name = f'dl_isac_sumrate_data_10_{num_ue}_{num_ap}'
     mat_data = scipy.io.loadmat('Data/' + file_name + '.mat')
 
 
@@ -136,25 +144,40 @@ if __name__ == '__main__':
     test_idx  = perm[num_train: num_train + num_test]
     eval_idx  = perm[-num_eval:]
     
-    # ## FL Data
-    # train_data, train_loader = build_decen_loader_isac(
-    #     beta_all[train_idx],
-    #     gamma_all[train_idx], 
-    #     phi_all[train_idx],
-    #     batch_size, seed=seed
-    # )
-    # test_data, test_loader = build_decen_loader_isac(
-    #     beta_all[test_idx], 
-    #     gamma_all[test_idx],
-    #     phi_all[test_idx], 
-    #     batch_size, seed=seed
-    # )
-    # eval_data, eval_loader = build_decen_loader_isac(
-    #     beta_all[eval_idx], 
-    #     gamma_all[eval_idx],
-    #     phi_all[eval_idx], 
-    #     num_eval, seed=seed
-    # )
+    ## FL Data
+    train_data, train_loader = build_decen_loader_isac(
+        beta_all[train_idx],
+        gamma_all[train_idx], 
+        phi_all[train_idx],
+        batch_size, 
+        zeta, nu,
+        rcs_all[train_idx],
+        ap_cor_all[train_idx],
+        sr_cor_all[train_idx],
+        seed=seed
+    )
+    test_data, test_loader = build_decen_loader_isac(
+        beta_all[test_idx], 
+        gamma_all[test_idx],
+        phi_all[test_idx], 
+        batch_size, 
+        zeta, nu,
+        rcs_all[test_idx],
+        ap_cor_all[test_idx],
+        sr_cor_all[test_idx],
+        seed=seed
+    )
+    eval_data, eval_loader = build_decen_loader_isac(
+        beta_all[eval_idx], 
+        gamma_all[eval_idx],
+        phi_all[eval_idx], 
+        num_eval,
+        zeta, nu,
+        rcs_all[eval_idx],
+        ap_cor_all[eval_idx],
+        sr_cor_all[eval_idx],
+        seed=seed
+    )
 
     ## Centralized Data
     train_data_cen, train_loader_cen = build_cen_loader_isac(
@@ -162,16 +185,18 @@ if __name__ == '__main__':
         gamma_all[train_idx], 
         phi_all[train_idx],
         batch_size, 
+        zeta, nu,
         rcs_all[train_idx],
         ap_cor_all[train_idx],
         sr_cor_all[train_idx],
-        isShuffle=True
+        isShuffle=True,
     )
     test_data_cen, test_loader_cen = build_cen_loader_isac(
         beta_all[test_idx], 
         gamma_all[test_idx],
         phi_all[test_idx], 
         batch_size,
+        zeta, nu,
         rcs_all[test_idx],
         ap_cor_all[test_idx],
         sr_cor_all[test_idx],
@@ -181,6 +206,7 @@ if __name__ == '__main__':
         gamma_all[eval_idx],
         phi_all[eval_idx], 
         num_eval,
+        zeta, nu,
         rcs_all[eval_idx],
         ap_cor_all[eval_idx],
         sr_cor_all[eval_idx],
@@ -190,19 +216,19 @@ if __name__ == '__main__':
     ap_dim = train_data_cen[0]['AP'].x.shape[1]
     ue_dim = train_data_cen[0]['UE'].x.shape[1]
     sr_dim = train_data_cen[0]['SR'].x.shape[1]
-    edge_dim = train_data_cen[0]['down'].edge_attr.shape[1]
-    tt_meta = [('UE', 'up', 'AP'), ('AP', 'down', 'UE')]
+    comm_edge_dim = train_data_cen[0][('AP', 'comm_down', 'UE')].edge_attr.shape[1]
+    sens_edge_dim = train_data_cen[0][('AP', 'sens_down', 'SR')].edge_attr.shape[1]
+
     dim_dict = {
         'UE': ue_dim,
         'AP': ap_dim,
         'SR': sr_dim,
-        'edge': edge_dim,        
+        'comm_edge': comm_edge_dim,        
+        'sens_edge': sens_edge_dim,        
     }
     
-    
     ## Centralized Model
-    cen_model = APHetNet(
-        metadata=tt_meta,
+    cen_model = IsacHetNet(
         dim_dict=dim_dict,
         out_channels=args.cen_hidden_channels,
         num_layers= args.cen_num_gnn_layers//2,
@@ -223,7 +249,7 @@ if __name__ == '__main__':
     
     # FL-GNN
 
-    # ## Model
+    ## Model
     # ap_dim = train_data[0][0]['AP'].x.shape[1]
     # ue_dim = train_data[0][0]['UE'].x.shape[1]  # Original UE dim (tau)
     # edge_dim = train_data[0][0]['down'].edge_attr.shape[1]
@@ -439,21 +465,24 @@ if __name__ == '__main__':
         print(f'Optimal rate: train {np.mean(rates_log_solutions[train_idx])}, test {np.mean(rates_log_solutions[test_idx])}')
         for epoch in range(num_epochs_cen):
             cen_model.train()
-            train_loss = cen_train_sumrate(
+            train_loss = cen_train_isac_sumrate(
                 epoch/(2*num_epochs_cen//3),
                 train_loader_cen, cen_model, cen_optimizer,
-                tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+                tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
+                nu=nu
             )
             
             cen_model.eval()
             with torch.no_grad():
-                train_eval = cen_eval_sumrate(
+                train_eval = cen_eval_isac_sumrate(
                     train_loader_cen, cen_model,
-                    tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+                    tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
+                    nu=nu
                 )   
-                test_eval = cen_eval_sumrate(
+                test_eval = cen_eval_isac_sumrate(
                     test_loader_cen, cen_model,
-                    tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna
+                    tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
+                    nu=nu
                 )  
             all_rate.append(train_eval)    
             all_rate_test.append(test_eval)    
@@ -501,10 +530,11 @@ if __name__ == '__main__':
             num_graph = batch.num_graphs
             x_dict, edge_dict, edge_index = cen_model(batch)
             
-            gnn_rates, all_one_rates = cen_loss_function_sumrate(
+            gnn_rates, all_one_rates = cen_loss_function_isac_sumrate(
                 batch, x_dict, edge_dict,
                 tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna, 
-                eval_mode=True
+                eval_mode=True,
+                nu=nu
             )
 
         # for local_model in local_models:
@@ -545,7 +575,7 @@ if __name__ == '__main__':
         plt.figure(figsize=(6,4), dpi=180)
         # plt.plot(all_one_rates, y_axis, label = 'Maximum Power', linewidth=2)
         plt.plot(gnn_rates, y_axis, label = 'Centralized GNN', linewidth=2)
-        plt.plot(fl_gnn_rates, y_axis, label = 'FL GNN', linewidth=2)
+        # plt.plot(fl_gnn_rates, y_axis, label = 'FL GNN', linewidth=2)
         # plt.plot(opt_rates, y_axis, label = 'Optimal', linewidth=2)
         plt.plot(rates_equal, y_axis, label = 'Equal Power', linewidth=2)
         # plt.plot(rates_frac, y_axis, label = 'Fractional Power', linewidth=2)

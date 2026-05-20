@@ -64,6 +64,7 @@ def load_isac_mat(mat_path):
 
 def create_graph_isac(
         Beta_all, Gamma_all, Phi_all,
+        zeta=None, nu=None,
         RCS_all=None, ap_cor_all=None, sr_cor_all=None,
         isDecentralized=True,
     ):
@@ -96,6 +97,7 @@ def create_graph_isac(
                     sr_cor=sr_cor_s,
                     ap_id=each_AP,
                     sample_id=each_sample,
+                    zeta=zeta, nu=nu
                 )
                 data_single_AP.append(data)
             data_list.append(data_single_AP)
@@ -112,6 +114,7 @@ def create_graph_isac(
                 rcs_single=rcs_s,
                 ap_cor=ap_cor_s,
                 sr_cor=sr_cor_s,
+                zeta=zeta, nu=nu
             )
             data_list.append(data)
     return data_list
@@ -119,7 +122,9 @@ def create_graph_isac(
 
 def full_het_graph_isac(
         beta_single_sample, gamma_single_sample, phi_single_sample,
+        zeta=None, nu=None,
         rcs_single=None, ap_cor=None, sr_cor=None,
+        # q_a_single=None, q_b_single=None, q_c_single=None,
         ap_id=None, sample_id=None,
     ):
     """
@@ -133,19 +138,48 @@ def full_het_graph_isac(
     Sensing side (only attached if rcs_single is provided):
         Nodes:  SR [num_SR, 1]
                 Target [1, 2]   (target location features placeholder)
-        Edges:  AP --senses--> SR       with attr [rcs]
-                SR --sensed_by--> AP    with attr [rcs]
+        Edges:  AP --- senses--> SR       with attr [rcs]
+                SR --- sensed_by--> AP    with attr [rcs]
         Plus AP/SR distance-to-target as node features if provided.
     """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    ## calculate the Fisher matrix for AP
+    dist_ap = np.linalg.norm(ap_cor, axis=1, keepdims=True)  # Shape: (M, 1)
+    dist_sr = np.linalg.norm(sr_cor, axis=1, keepdims=True)  # Shape: (T, 1)
+
+    eps = np.finfo(float).eps
+    dc_ap = ap_cor / (dist_ap + eps)  # Shape: (M, 2)
+    dc_sr = sr_cor / (dist_sr + eps)  # Shape: (T, 2)
+
+    # Reshape for broadcasting: APs as column vectors (M, 1), SRs as row vectors (1, T)
+    dc_ap_x = dc_ap[:, 0:1]  
+    dc_ap_y = dc_ap[:, 1:2]  
+    dc_sr_x = dc_sr[:, 0:1].T  
+    dc_sr_y = dc_sr[:, 1:2].T  
+
+    # --- 3. Compute Gradients (Broadcasting creates M x T matrices) ---
+    grad_x = dc_ap_x + dc_sr_x  # Shape: (M, T)
+    grad_y = dc_ap_y + dc_sr_y  # Shape: (M, T)
+
+    # --- 4. Accumulate Fisher Information ---
+    # Multiply by rcs_mt and sum over the T dimension (axis=1)
+    q_a = zeta * np.sum(rcs_single * (grad_x ** 2), axis=1, keepdims=True)      # Shape: (M,)
+    q_b = zeta * np.sum(rcs_single * (grad_y ** 2), axis=1, keepdims=True)      # Shape: (M,)
+    q_c = zeta * np.sum(rcs_single * (grad_x * grad_y), axis=1, keepdims=True)  # Shape: (M,)
+
+
     num_AP, num_UE = beta_single_sample.shape
 
     # ---------- AP / UE nodes ----------
-    ap_features = np.ones((num_AP, 1), dtype=np.float32)
+    # ap_features = np.ones((num_AP, 1), dtype=np.float32)
     # Append target distance to AP feature  -> [num_AP, 2]
     ap_features = np.concatenate(
-        [ap_features, np.asarray(ap_cor, dtype=np.float32)],
+        [
+            # ap_features, 
+            np.asarray(ap_cor, dtype=np.float32), 
+            q_a, q_b, q_c
+        ], 
         axis=1,
     )
     ue_features = phi_single_sample
@@ -181,10 +215,10 @@ def full_het_graph_isac(
     data = HeteroData()
     data['AP'].x = x_ap
     data['UE'].x = x_ue
-    data['AP', 'down', 'UE'].edge_index = edge_index_ap_down_ue
-    data['AP', 'down', 'UE'].edge_attr  = edge_attr_ap_to_ue
-    data['UE', 'up', 'AP'].edge_index = edge_index_ue_up_ap
-    data['UE', 'up', 'AP'].edge_attr  = edge_attr_ue_up_ap
+    data['AP', 'comm_down', 'UE'].edge_index = edge_index_ap_down_ue
+    data['AP', 'comm_down', 'UE'].edge_attr  = edge_attr_ap_to_ue
+    data['UE', 'comm_up', 'AP'].edge_index = edge_index_ue_up_ap
+    data['UE', 'comm_up', 'AP'].edge_attr  = edge_attr_ue_up_ap
 
     # ---------- Sensing receivers (optional) ----------
     rcs_mat = np.asarray(rcs_single, dtype=np.float32)   # [num_AP, num_SR]
@@ -192,10 +226,13 @@ def full_het_graph_isac(
         f"RCS first dim {rcs_mat.shape[0]} must match num_AP {num_AP}"
     num_SR = rcs_mat.shape[1]
 
-    sr_features = np.ones((num_SR, 1), dtype=np.float32)
+    # sr_features = np.ones((num_SR, 1), dtype=np.float32)
     if sr_cor is not None:
         sr_features = np.concatenate(
-            [sr_features, np.asarray(sr_cor, dtype=np.float32)],
+            [
+                # sr_features,
+                np.asarray(sr_cor, dtype=np.float32)
+            ],
             axis=1,
         )
     x_sr = torch.tensor(sr_features, dtype=torch.float32).to(device)
@@ -219,10 +256,10 @@ def full_het_graph_isac(
     edge_attr_sr_ap = torch.tensor(rcs_sr_ap, dtype=torch.float32).to(device)
 
     data['SR'].x = x_sr
-    data['AP', 'senses',    'SR'].edge_index = edge_index_ap_sr
-    data['AP', 'senses',    'SR'].edge_attr  = edge_attr_ap_sr
-    data['SR', 'sensed_by', 'AP'].edge_index = edge_index_sr_ap
-    data['SR', 'sensed_by', 'AP'].edge_attr  = edge_attr_sr_ap
+    data['AP', 'sens_down',    'SR'].edge_index = edge_index_ap_sr
+    data['AP', 'sens_down',    'SR'].edge_attr  = edge_attr_ap_sr
+    data['SR', 'sens_up', 'AP'].edge_index = edge_index_sr_ap
+    data['SR', 'sens_up', 'AP'].edge_attr  = edge_attr_sr_ap
 
     data.ap_id = ap_id
     data.sample_id = sample_id
@@ -251,12 +288,14 @@ def build_loader(per_ap_datasets, batch_size, seed, drop_last=True, num_workers=
 
 def build_cen_loader_isac(
         betaMatrix, gammaMatrix, phiMatrix, batchSize,
+        zeta=None, nu=None,
         rcsMatrix=None, ap_coordination=None, sr_coordination=None,
         isShuffle=False,
     ):
     log_large_scale = np.log1p(betaMatrix)
     data_cen = create_graph_isac(
         log_large_scale, gammaMatrix, phiMatrix,
+        zeta=zeta, nu=nu,
         RCS_all=rcsMatrix,
         ap_cor_all=ap_coordination,
         sr_cor_all=sr_coordination,
@@ -268,12 +307,14 @@ def build_cen_loader_isac(
 
 def build_decen_loader_isac(
         betaMatrix, gammaMatrix, phiMatrix, batchSize,
+        zeta=None, nu=None,
         rcsMatrix=None, ap_coordination=None, sr_coordination=None,
         seed=1712,
     ):
     log_large_scale = np.log1p(betaMatrix)
     data_decen = create_graph_isac(
         log_large_scale, gammaMatrix, phiMatrix,
+        zeta=zeta, nu=nu,
         RCS_all=rcsMatrix,
         ap_cor_all=ap_coordination,
         sr_cor_all=sr_coordination,
