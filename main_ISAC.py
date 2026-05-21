@@ -13,12 +13,12 @@ import scipy.io
 from Utils.isac_data import build_cen_loader_isac, build_decen_loader_isac
 
 from Models.GNN import IsacHetNet
-from Models.FedGNN import APHetNetFL_sumrate as APHetNetFL
+from Models.FedGNN import IsacHetNetFL as IsacHetNetFL
 from Utils.args import parse_args
 from Utils.centralized_train import cen_eval_isac_sumrate, cen_train_isac_sumrate, cen_loss_function_isac_sumrate
 # from Utils.decentralized_train import FedAvg, FedAvgM, FedSoftMin
 
-from Utils.fl_train import fl_train_sumrate, get_global_info, fl_eval_sumrate, server_return_GAP, get_global_info_2nd
+from Utils.fl_train_isac import fl_train_isac_sumrate, get_global_info_isac, fl_eval_isac_sumrate, server_return_isac, get_global_info_isac_2nd
 from Utils.fl_train import FedAvg, FedProx
 
 
@@ -240,213 +240,205 @@ if __name__ == '__main__':
         cen_model.parameters(), lr=cen_lr, weight_decay=1e-4
     )
 
-
     cen_scheduler = torch.optim.lr_scheduler.StepLR(
         cen_optimizer, step_size=num_epochs_cen//10, gamma=0.8
-    )
-    
+    )    
     
     
     # FL-GNN
 
     ## Model
-    # ap_dim = train_data[0][0]['AP'].x.shape[1]
-    # ue_dim = train_data[0][0]['UE'].x.shape[1]  # Original UE dim (tau)
-    # edge_dim = train_data[0][0]['down'].edge_attr.shape[1]
 
-    # tt_meta = [('UE', 'up', 'AP'), ('AP', 'down', 'UE')]
-    # dim_dict = {
-    #     'UE': ue_dim,  # Augmented UE dimension
-    #     'AP': ap_dim,
-    #     'edge': edge_dim,
-    # }
+    # FL model expects augmented UE features: [tau + 3]
+    aug_ue_dim = 4
+    aug_ap_dim = 1
 
-    # # FL model expects augmented UE features: [tau + 3]
-    # aug_ue_dim = 4
+    # Initialize the models, optimizers, and schedulers for clients
+    global_model = IsacHetNetFL(
+        dim_dict=dim_dict,
+        out_channels=hidden_channels,
+        aug_feat_dim=aug_ue_dim,  # DS, PC, UI, rate_without_me + 3?
+        aug_feat_dim_ap=aug_ap_dim,  # global sinr
+        num_layers=num_gnn_layers,
+        hid_layers=hidden_channels//2,
+    ).to(device)
 
-    # # Initialize the models, optimizers, and schedulers for clients
-    # global_model = APHetNetFL(
-    #     metadata=tt_meta,
-    #     dim_dict=dim_dict,
-    #     out_channels=hidden_channels,
-    #     aug_feat_dim=aug_ue_dim,  # DS, PC, UI, rate_without_me + 3?
-    #     num_layers=num_gnn_layers,
-    #     hid_layers=hidden_channels//2,
-    # ).to(device)
+    global_optimizer = torch.optim.AdamW(global_model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
 
-    # global_optimizer = torch.optim.AdamW(global_model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
-
-    # global_scheduler = torch.optim.lr_scheduler.StepLR(
-    #     global_optimizer, step_size=num_rounds//3, gamma=0.5
-    # )
+    global_scheduler = torch.optim.lr_scheduler.StepLR(
+        global_optimizer, step_size=num_rounds//3, gamma=0.5
+    )
 
 
-    # local_models, optimizers, schedulers = [], [], []
-    # for _ in range(num_clients):
-    #     model = APHetNetFL(
-    #         metadata=tt_meta,
-    #         dim_dict=dim_dict,
-    #         out_channels=hidden_channels,
-    #         aug_feat_dim=aug_ue_dim,
-    #         num_layers=num_gnn_layers,
-    #         hid_layers=hidden_channels//2,
-    #         isDecentralized=False
-    #     ).to(device)
-    #     model.load_state_dict(global_model.state_dict())
-    #     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
-    #     local_models.append(model)
-    #     optimizers.append(optimizer)
-    #     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_rounds, eta_min=1e-5)
-    #     schedulers.append(scheduler)
+    local_models, optimizers, schedulers = [], [], []
+    for _ in range(num_clients):
+        model = IsacHetNetFL(
+            dim_dict=dim_dict,
+            out_channels=hidden_channels,
+            aug_feat_dim=aug_ue_dim,
+            aug_feat_dim_ap=aug_ap_dim,  # global sinr
+            num_layers=num_gnn_layers,
+            hid_layers=hidden_channels//2,
+            isDecentralized=False
+        ).to(device)
+        model.load_state_dict(global_model.state_dict())
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.999), weight_decay=1e-4)
+        local_models.append(model)
+        optimizers.append(optimizer)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_rounds, eta_min=1e-5)
+        schedulers.append(scheduler)
     
-    # from Utils.fl_train import FedAvg, FedAdam, FedGM, sample_clients
-    # if args.fl_scheme == 'fedavg':
-    #     fed = FedAvg(client_fraction=client_fraction)
-    # elif args.fl_scheme == 'fedadam':
-    #     fed = FedAdam(client_fraction=client_fraction)
-    # elif args.fl_scheme == 'fedgm':
-    #     fed = FedGM(client_fraction=client_fraction, server_lr=args.server_lr)
-    # elif args.fl_scheme == 'fedprox':
-    #     fed = FedProx(client_fraction=client_fraction, mu=args.mu)
-    #     fed.set_global_weights(global_model)
-    # # elif args.fl_scheme == 'scaffold':
-    # #     fed = SCAFFOLD(client_fraction=client_fraction)
-    # #     fed.init_controls(global_model, num_clients)
-    # else:
-    #     raise ValueError(f'Handling global update in {args.fl_scheme.upper()} is not supported!')
+    from Utils.fl_train import FedAvg, FedAdam, FedGM, sample_clients
+    if args.fl_scheme == 'fedavg':
+        fed = FedAvg(client_fraction=client_fraction)
+    elif args.fl_scheme == 'fedadam':
+        fed = FedAdam(client_fraction=client_fraction)
+    elif args.fl_scheme == 'fedgm':
+        fed = FedGM(client_fraction=client_fraction, server_lr=args.server_lr)
+    elif args.fl_scheme == 'fedprox':
+        fed = FedProx(client_fraction=client_fraction, mu=args.mu)
+        fed.set_global_weights(global_model)
+    # elif args.fl_scheme == 'scaffold':
+    #     fed = SCAFFOLD(client_fraction=client_fraction)
+    #     fed.init_controls(global_model, num_clients)
+    else:
+        raise ValueError(f'Handling global update in {args.fl_scheme.upper()} is not supported!')
     
-    # ## Training FL-GNN
+    ## Training FL-GNN
     
-    # fl_all_rate = []
-    # fl_all_rate_test = []
+    fl_all_rate = []
+    fl_all_rate_test = []
 
-    ### Training loop
-    # if args.fl_pretrain is None:
-    #     start_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-    #     print(f"\n ===={start_time}==== Training FL-GNN using {args.fl_scheme.upper()} ... ")
-    #     start_time = time.time()
-    #     print(f'Equal Power rate: train {np.mean(rates_equal_solutions[train_idx])}, test {np.mean(rates_equal_solutions[test_idx])}')
-    #     # print(f'Fractional Power rate: train {np.mean(rates_frac_solutions[train_idx])}, test {np.mean(rates_frac_solutions[test_idx])}')
-    #     print(f'Log Approximation rate: train {np.mean(rates_log_solutions[train_idx])}, test {np.mean(rates_log_solutions[test_idx])}')
-    #     for round in range(num_rounds):
-    #         ## Send the information to the global server
-    #         ## DS, PC, UI - for rate calculation
-    #         ## AP, UE, others, to augmented graph
-    #         send_to_server = get_global_info(
-    #             train_loader, local_models,
-    #             tau=tau, rho_p=rho_p, rho_d=rho_d,
-    #             num_antenna=num_antenna,
-    #         )            
-    #         # response_from_server = server_return(train_loader, send_to_server, num_antenna=num_antenna)
-    #         response_from_server = server_return_GAP(train_loader, send_to_server, num_antenna=num_antenna)
+    ## Training loop
+    if args.fl_pretrain is None:
+        start_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+        print(f"\n ===={start_time}==== Training FL-GNN using {args.fl_scheme.upper()} ... ")
+        start_time = time.time()
+        print(f'Equal Power rate: train {np.mean(rates_equal_solutions[train_idx])}, test {np.mean(rates_equal_solutions[test_idx])}')
+        # print(f'Fractional Power rate: train {np.mean(rates_frac_solutions[train_idx])}, test {np.mean(rates_frac_solutions[test_idx])}')
+        print(f'Log Approximation rate: train {np.mean(rates_log_solutions[train_idx])}, test {np.mean(rates_log_solutions[test_idx])}')
+        for round in range(num_rounds):
+            ## Send the information to the global server
+            ## DS, PC, UI - for rate calculation
+            ## AP, UE, others, to augmented graph
+            send_to_server = get_global_info_isac(
+                train_loader, local_models,
+                tau=tau, rho_p=rho_p, rho_d=rho_d,
+                num_antenna=num_antenna,
+            )            
+            # response_from_server = server_return(train_loader, send_to_server, num_antenna=num_antenna)
+            response_from_server = server_return_isac(train_loader, send_to_server, num_antenna=num_antenna)
 
-    #         for _ in range(comm_rounds):
-    #             send_to_server = get_global_info_2nd(
-    #                 response_from_server, local_models,
-    #                 tau=tau, rho_p=rho_p, rho_d=rho_d,
-    #                 num_antenna=num_antenna
-    #             )  
-    #             response_from_server = server_return_GAP(train_loader, send_to_server, num_antenna=num_antenna)
+            for comm_id in range(comm_rounds):
+                send_to_server = get_global_info_isac_2nd(
+                    response_from_server, local_models,
+                    tau=tau, rho_p=rho_p, rho_d=rho_d,
+                    num_antenna=num_antenna
+                )  
+                response_from_server = server_return_isac(train_loader, send_to_server, num_antenna=num_antenna)
 
-    #         local_gradients = []
-    #         local_rates = []
-    #         # total_rate = 0.0
-    #         # total_loss = 0.0
-    #         selected_clients = sample_clients(client_fraction, num_clients)
+            local_gradients = []
+            local_rates = []
+            # total_rate = 0.0
+            # total_loss = 0.0
+            selected_clients = sample_clients(client_fraction, num_clients)
 
-    #         delta_c_list = [None] * num_clients
-    #         for client_idx, (model, opt, client_data_tuple) in enumerate(zip(local_models, optimizers, zip(*response_from_server))):
-    #             batches = [item['loader'] for item in client_data_tuple]
-    #             batch_rate = [item['rate_pack'] for item in client_data_tuple]
-    #             global_rate = [item['global_rate'] for item in client_data_tuple]
-    #             interference = [item['responsibility'] for item in client_data_tuple]
-
-
-    #             if client_idx in selected_clients:
-    #                 for _ in range(num_epochs):
-    #                     train_loss, _ = fl_train_sumrate(
-    #                         batches,
-    #                         batch_rate, global_rate, interference,
-    #                         model, opt,
-    #                         tau=tau, rho_p=rho_p, rho_d=rho_d,
-    #                         num_antenna=num_antenna, alpha=args.alpha,
-    #                         round_ratio=round/num_rounds,
-    #                     )
-    #                 if hasattr(fed, 'update_client_control'):    
-    #                     lr_current = opt.param_groups[0]['lr']
-    #                     K = num_epochs * len(batches)
-    #                     delta_c_list[client_idx] = fed.update_client_control(model, global_model, client_idx, K, lr_current)
-    #         if hasattr(fed, 'aggregate_controls'):
-    #             fed.aggregate_controls(delta_c_list, selected_clients)
-    #         global_weights = fed.aggregate(global_model, local_models, selected_clients)
-
-    #         global_model.load_state_dict(global_weights)
-    #         for model in local_models:
-    #             model.load_state_dict(global_model.state_dict())
-    #         if hasattr(fed, 'set_global_weights'):
-    #             fed.set_global_weights(global_model)
+            delta_c_list = [None] * num_clients
+            for client_idx, (model, opt, client_data_tuple) in enumerate(zip(local_models, optimizers, zip(*response_from_server))):
+                batches = [item['loader'] for item in client_data_tuple]
+                batch_rate = [item['rate_pack'] for item in client_data_tuple]
+                global_rate = [item['global_rate'] for item in client_data_tuple]
+                interference = [item['responsibility'] for item in client_data_tuple]
 
 
-    #         if round % eval_round == 0:
-    #             ## Evaluate on the client local data (both train and test)
-    #             total_train_rate = fl_eval_sumrate(
-    #                 train_loader, local_models, comm_rounds,
-    #                 tau, rho_p, rho_d, num_antenna
-    #             )
-    #             total_train_rate = torch.mean(total_train_rate).cpu().detach()
+                if client_idx in selected_clients:
+                    for _ in range(num_epochs):
+                        train_loss, _ = fl_train_isac_sumrate(
+                            batches,
+                            batch_rate, global_rate, interference,
+                            model, opt,
+                            tau=tau, rho_p=rho_p, rho_d=rho_d,
+                            num_antenna=num_antenna, 
+                            zeta=zeta, nu=nu,
+                            alpha=args.alpha, round_ratio=round/num_rounds,
+                        )
+                    if hasattr(fed, 'update_client_control'):    
+                        lr_current = opt.param_groups[0]['lr']
+                        K = num_epochs * len(batches)
+                        delta_c_list[client_idx] = fed.update_client_control(model, global_model, client_idx, K, lr_current)
+            if hasattr(fed, 'aggregate_controls'):
+                fed.aggregate_controls(delta_c_list, selected_clients)
+            global_weights = fed.aggregate(global_model, local_models, selected_clients)
 
-    #             total_eval_rate = fl_eval_sumrate(
-    #                 test_loader, local_models, comm_rounds,
-    #                 tau, rho_p, rho_d, num_antenna
-    #             )
-    #             total_eval_rate = torch.mean(total_eval_rate).cpu().detach()
+            global_model.load_state_dict(global_weights)
+            for model in local_models:
+                model.load_state_dict(global_model.state_dict())
+            if hasattr(fed, 'set_global_weights'):
+                fed.set_global_weights(global_model)
 
-    #             fl_all_rate.append(total_train_rate)
-    #             fl_all_rate_test.append(total_eval_rate)
 
-    #             print(f"Round {round+1:03d}/{num_rounds}: "
-    #                 # f"Avg Loss = {avg_loss:.4f} | "
-    #                 # f"Avg Min Rate = {avg_rate:.4f} | "
-    #                 f"Avg Train Rate = {total_train_rate:.4f} | "
-    #                 f"Avg Eval Rate = {total_eval_rate:.4f} | "
-    #             )
-    #         for client_idx in selected_clients:
-    #             schedulers[client_idx].step()
+            if round % eval_round == 0:
+                ## Evaluate on the client local data (both train and test)
+                total_train_rate = fl_eval_isac_sumrate(
+                    train_loader, local_models, comm_rounds,
+                    tau, rho_p, rho_d, num_antenna,
+                    zeta=zeta, nu=nu
+                )
+                total_train_rate = torch.mean(total_train_rate).cpu().detach()
+
+                total_eval_rate = fl_eval_isac_sumrate(
+                    test_loader, local_models, comm_rounds,
+                    tau, rho_p, rho_d, num_antenna,
+                    zeta=zeta, nu=nu
+                )
+                total_eval_rate = torch.mean(total_eval_rate).cpu().detach()
+
+                fl_all_rate.append(total_train_rate)
+                fl_all_rate_test.append(total_eval_rate)
+
+                print(f"Round {round+1:03d}/{num_rounds}: "
+                    # f"Avg Loss = {avg_loss:.4f} | "
+                    # f"Avg Min Rate = {avg_rate:.4f} | "
+                    f"Avg Train Rate = {total_train_rate:.4f} | "
+                    f"Avg Eval Rate = {total_eval_rate:.4f} | "
+                )
+            for client_idx in selected_clients:
+                schedulers[client_idx].step()
             
-    #         # if round == int(0.75 * num_rounds):
-    #         #     for opt in optimizers:
-    #         #         for g in opt.param_groups:
-    #         #             g['lr'] = 1e-5
+            # if round == int(0.75 * num_rounds):
+            #     for opt in optimizers:
+            #         for g in opt.param_groups:
+            #             g['lr'] = 1e-5
         
-    #     end_time = time.time()
-    #     execution_time = end_time - start_time
-    #     print(f"Execution Time: {timedelta(seconds=execution_time)}")
-    #     fl_model_filename = f'{MODEL_DIR}/{timestamp}_fl.pth'
-    #     torch.save(global_model.state_dict(), fl_model_filename)
-    #     print(f'Save FL GNN to {fl_model_filename}.')
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"Execution Time: {timedelta(seconds=execution_time)}")
+        fl_model_filename = f'{MODEL_DIR}/{timestamp}_fl.pth'
+        torch.save(global_model.state_dict(), fl_model_filename)
+        print(f'Save FL GNN to {fl_model_filename}.')
 
-    #     plt.figure(figsize=(6,4), dpi=180)
-    #     x_axis = [i * eval_round for i in range(len(fl_all_rate))]
-    #     plt.plot(x_axis, fl_all_rate, label='Training Rate', linewidth=2)
-    #     plt.plot(x_axis, fl_all_rate_test, label='Testing Rate', linewidth=2)
-    #     plt.axhline(y=np.mean(rates_log_solutions[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
-    #     plt.axhline(y=np.mean(rates_log_solutions[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
-    #     plt.xlabel('Rounds', fontsize=12)
-    #     plt.ylabel('Rate', fontsize=12)
-    #     plt.title(f'{args.fl_scheme.upper()}  GNN Training Rate Curve - {args.lr}_{args.num_rounds}', fontsize=14)
-    #     plt.grid(True, linestyle='--', alpha=0.6)
-    #     plt.legend()
-    #     plt.tight_layout()
-    #     figure_name = f'{timestamp}_fl'
-    #     save_path = TRAIN_DIR + f'{figure_name}.png' 
-    #     plt.savefig(save_path, dpi=300) 
+        plt.figure(figsize=(6,4), dpi=180)
+        x_axis = [i * eval_round for i in range(len(fl_all_rate))]
+        plt.plot(x_axis, fl_all_rate, label='Training Rate', linewidth=2)
+        plt.plot(x_axis, fl_all_rate_test, label='Testing Rate', linewidth=2)
+        plt.axhline(y=np.mean(rates_log_solutions[train_idx]), linewidth=2, color='r', linestyle='--', label='Training Optimal')
+        plt.axhline(y=np.mean(rates_log_solutions[test_idx]), linewidth=2, color='b', linestyle='--', label='Testing Optimal')
+        plt.xlabel('Rounds', fontsize=12)
+        plt.ylabel('Rate', fontsize=12)
+        plt.title(f'{args.fl_scheme.upper()}  GNN Training Rate Curve - {args.lr}_{args.num_rounds}', fontsize=14)
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.legend()
+        plt.tight_layout()
+        figure_name = f'{timestamp}_fl'
+        save_path = TRAIN_DIR + f'{figure_name}.png' 
+        plt.savefig(save_path, dpi=300) 
 
         
-    # else:
-    #     fl_model_filename = f'{MODEL_DIR}/{args.fl_pretrain}.pth'
-    #     global_model.load_state_dict(torch.load(fl_model_filename))
-    #     for model in local_models:
-    #         model.load_state_dict(global_model.state_dict())
+    else:
+        fl_model_filename = f'{MODEL_DIR}/{args.fl_pretrain}.pth'
+        global_model.load_state_dict(torch.load(fl_model_filename))
+        for model in local_models:
+            model.load_state_dict(global_model.state_dict())
 
 
     
@@ -537,24 +529,24 @@ if __name__ == '__main__':
                 nu=nu
             )
 
-        # for local_model in local_models:
-        #     local_model.eval()
+        for local_model in local_models:
+            local_model.eval()
 
 
-        # fl_gnn_rates = fl_eval_sumrate(
-        #     eval_loader, local_models, comm_rounds,
-        #     tau, rho_p, rho_d, num_antenna
-        # )
+        fl_gnn_rates = fl_eval_isac_sumrate(
+            eval_loader, local_models, comm_rounds,
+            tau, rho_p, rho_d, num_antenna,
+            zeta=zeta, nu=nu
+        )
 
             
-        # fl_gnn_rates = fl_gnn_rates.detach().cpu().numpy() 
+        fl_gnn_rates = fl_gnn_rates.detach().cpu().numpy() 
         gnn_rates = gnn_rates.detach().cpu().numpy() 
         all_one_rates = all_one_rates.detach().cpu().numpy()
         rates_equal = rates_equal_solutions[eval_idx] 
         rates_frac = rates_frac_solutions[eval_idx] 
         rates_log = rates_log_solutions[eval_idx] 
 
-        fl_gnn_rates = all_one_rates.copy()
 
         max_value = np.ceil(max(np.max(all_one_rates), np.max(fl_gnn_rates), np.max(gnn_rates), np.max(rates_equal), np.max(rates_frac), np.max(rates_log))*100)/100
         
@@ -575,7 +567,7 @@ if __name__ == '__main__':
         plt.figure(figsize=(6,4), dpi=180)
         # plt.plot(all_one_rates, y_axis, label = 'Maximum Power', linewidth=2)
         plt.plot(gnn_rates, y_axis, label = 'Centralized GNN', linewidth=2)
-        # plt.plot(fl_gnn_rates, y_axis, label = 'FL GNN', linewidth=2)
+        plt.plot(fl_gnn_rates, y_axis, label = 'FL GNN', linewidth=2)
         # plt.plot(opt_rates, y_axis, label = 'Optimal', linewidth=2)
         plt.plot(rates_equal, y_axis, label = 'Equal Power', linewidth=2)
         # plt.plot(rates_frac, y_axis, label = 'Fractional Power', linewidth=2)
@@ -592,7 +584,7 @@ if __name__ == '__main__':
 
 
 
-print(f' Fixed Circuit 6')
+print(f' Test local crlb in loss (no clientRespons pack, globla CRLB in UE) ')
 
 ## Todo: Check on the benchmark
 # Try not using the DS/PC/UI when local training (using MLP to predict using GAP feature)
