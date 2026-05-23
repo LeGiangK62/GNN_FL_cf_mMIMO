@@ -366,6 +366,7 @@ class IsacHetNetFL(nn.Module):
             self, dim_dict, out_channels, 
             aug_feat_dim=4, 
             aug_feat_dim_ap=1,
+            aug_feat_dim_sr=1,
             num_layers=0, hid_layers=4, 
             isDecentralized=False
         ):
@@ -380,6 +381,7 @@ class IsacHetNetFL(nn.Module):
         self.ap_dim        = src_dim_dict['AP'] 
         self.ap_dim_aug        = src_dim_dict['AP'] + aug_feat_dim_ap
         self.sr_dim        = src_dim_dict['SR']
+        self.sr_dim_aug        = src_dim_dict['SR'] + out_channels + aug_feat_dim_sr
         self.comm_edge_dim = src_dim_dict['comm_edge']
         self.sense_edge_dim = src_dim_dict['sens_edge']
         self.out_channels  = out_channels
@@ -453,10 +455,13 @@ class IsacHetNetFL(nn.Module):
         hid = hid_layers
 
         ## NOTE: Start AP augmentation
-        # No ap aug
         self.ue_encoder_raw = MLP([self.ue_dim, hid, self.ue_dim_aug], batch_norm=True, dropout_prob=0.1)
         self.ue_encoder_aug = MLP([self.ue_dim_aug, hid, out_channels - self.ue_dim], batch_norm=True, dropout_prob=0.1)
+        # No ap aug
         self.ap_encoder_raw = MLP([self.ap_dim, hid, out_channels], batch_norm=True, dropout_prob=0.1)
+        # No sr aug
+        self.sr_encoder     = MLP([self.sr_dim,  hid, out_channels], batch_norm=True, dropout_prob=0.1)
+        self.sr_encoder_aug = MLP([self.sr_dim_aug,  hid, out_channels], batch_norm=True, dropout_prob=0.1)
 
         # No ap aug
         # self.ue_encoder_raw = MLP([self.ue_dim, hid, self.ue_dim_aug], batch_norm=True, dropout_prob=0.1)
@@ -466,7 +471,6 @@ class IsacHetNetFL(nn.Module):
 
         #Endregion
 
-        self.sr_encoder     = MLP([self.sr_dim,  hid, out_channels], batch_norm=True, dropout_prob=0.1)
         self.power_edge = nn.Sequential(
             MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1),
             Seq(Lin(hid, 1))
@@ -475,7 +479,10 @@ class IsacHetNetFL(nn.Module):
     def forward(self, batch, isRawData=False):
         x_dict, edge_index_dict, edge_attr_dict = batch.x_dict, batch.edge_index_dict, batch.edge_attr_dict
 
-        x_dict['SR'] = self.sr_encoder(x_dict['SR'])
+        if isRawData:
+            x_dict['SR'] = self.sr_encoder(x_dict['SR'])
+        else:
+            x_dict['SR'] = self.sr_encoder_aug(x_dict['SR'])
 
         ue_tmp = x_dict['UE']
         if isRawData:

@@ -82,20 +82,35 @@ def loss_function_isac_sumrate(
     all_UI = [UI_k] # + [r['UI'] for r in clientResponse]
 
 
-    all_Sa = [Sa_k] + [r['Sa'] for r in clientResponse]
-    all_Sb = [Sb_k] + [r['Sb'] for r in clientResponse]
-    all_Sc = [Sc_k] + [r['Sc'] for r in clientResponse]
+    all_Sa = [Sa_k] # + [r['Sa'] for r in clientResponse]
+    all_Sb = [Sb_k] # + [r['Sb'] for r in clientResponse]
+    all_Sc = [Sc_k] # + [r['Sc'] for r in clientResponse]
 
     all_Sa = torch.cat(all_Sa, dim=1)
     all_Sb = torch.cat(all_Sb, dim=1)
     all_Sc = torch.cat(all_Sc, dim=1)
 
-    Sigma_a = torch.sum(all_Sa, dim=1)  
-    Sigma_b = torch.sum(all_Sb, dim=1)
-    Sigma_c = torch.sum(all_Sc, dim=1)
+    if hasattr(graphData, 'w_a'):
+        w_a = graphData.w_a.view(num_graphs, 1, 1)
+        w_b = graphData.w_b.view(num_graphs, 1, 1)
+        w_c = graphData.w_c.view(num_graphs, 1, 1)
+        global_crlb = graphData.global_crlb.view(num_graphs, 1, 1)
+        
+        # Linear proxy loss mimicking the exact CRLB gradient (apply gradient only if global crlb > 0)
+        relu_mask = (global_crlb > 0).float()
+        crlb_proxy = w_a * Sa_k + w_b * Sb_k + w_c * Sc_k
+        crlb_loss = (crlb_proxy * relu_mask).sum(dim=1)
 
-    crlb = (Sigma_a + Sigma_b) - nu * (Sigma_a * Sigma_b - Sigma_c ** 2)
-    crlb_loss = torch.relu(crlb)
+    else:
+        Sigma_a = torch.sum(all_Sa, dim=1)  
+        Sigma_b = torch.sum(all_Sb, dim=1)
+        Sigma_c = torch.sum(all_Sc, dim=1)
+
+        crlb = (Sigma_a + Sigma_b) - nu * (Sigma_a * Sigma_b - Sigma_c ** 2)
+        crlb_loss = torch.relu(crlb)
+
+
+    ## ======== Comm
 
     all_DS = torch.cat(all_DS, dim=1)
     all_PC = torch.cat(all_PC, dim=1)
@@ -249,6 +264,7 @@ def server_return_isac(dataLoader, globalInformation, num_antenna=1, nu=1):
         aug_batch_list = []
         all_client_embeddings = [r['UE'] for r in all_response]
         all_AP_embeddings = [r['AP'] for r in all_response]
+        all_SR_embeddings = [r['SR'] for r in all_response]
         all_edge_embeddings = [r['edge_down'] for r in all_response]
 
         all_DS = [r['DS'][:,0,:] for r in all_response] # [B, num_client, K]
@@ -337,7 +353,7 @@ def server_return_isac(dataLoader, globalInformation, num_antenna=1, nu=1):
             ###
             # Rate pack from other APs (DC, PC, UI)
             other_pack = []
-            keys_needed = ['DS', 'PC', 'UI', 'Sa', 'Sb', 'Sc']
+            keys_needed = ['DS', 'PC', 'UI'] # Sa, Sb, Sc are now embedded via w_a, w_b, w_c
             for j in range(num_client):
                 if j != client_id:
                     full_data = all_response[j]
@@ -346,6 +362,24 @@ def server_return_isac(dataLoader, globalInformation, num_antenna=1, nu=1):
 
             aug_batch = batch.clone()
             device = aug_batch['UE'].x.device
+            
+            # Calculate Sensing Proxy Weights (Global context)
+            other_Sa = torch.stack(all_Sa[:client_id] + all_Sa[client_id+1:], dim=1).sum(dim=1) # [B, 1]
+            other_Sb = torch.stack(all_Sb[:client_id] + all_Sb[client_id+1:], dim=1).sum(dim=1)
+            other_Sc = torch.stack(all_Sc[:client_id] + all_Sc[client_id+1:], dim=1).sum(dim=1)
+            
+            # # Option 1
+            # aug_batch.w_a = (1.0 - nu * other_Sb).to(device)
+            # aug_batch.w_b = (1.0 - nu * other_Sa).to(device)
+            # aug_batch.w_c = (2.0 * nu * other_Sc).to(device)
+
+            # Option 2
+            aug_batch.w_a = (1.0 - nu * Sigma_b).to(device)
+            aug_batch.w_b = (1.0 - nu * Sigma_a).to(device)
+            aug_batch.w_c = (2.0 * nu * Sigma_c).to(device)
+
+
+            aug_batch.global_crlb = global_crlb.to(device)
 
             ########### Start
             # GAP 
@@ -539,6 +573,24 @@ def server_return_isac(dataLoader, globalInformation, num_antenna=1, nu=1):
                 dim=-1
             )
 
+            ## Global SR feature
+
+            other_SR = torch.stack(
+                all_SR_embeddings[:client_id] + all_SR_embeddings[client_id+1:], dim=0
+            )  # [num_client-1, B*num_SR, feat_dim]
+            global_sr_context = other_SR.mean(dim=0).to(device)  # [B*num_SR, feat_dim]
+
+            sr_batch_idx = aug_batch['SR'].batch  # e.g., [0, 0, 1, 1, 2, 2...]
+            expanded_crlb = global_crlb[sr_batch_idx].to(device)
+
+            aug_batch['SR'].x = torch.cat(
+                [
+                    aug_batch['SR'].x, 
+                    global_sr_context, 
+                    expanded_crlb
+                ],
+                dim=-1
+            )
     
             # aug_batch['AP'].x = torch.cat(
             #     [

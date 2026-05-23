@@ -252,6 +252,7 @@ if __name__ == '__main__':
     # FL model expects augmented UE features: [tau + 3]
     aug_ue_dim = 4
     aug_ap_dim = 1
+    aug_sr_dim = 1
 
     # Initialize the models, optimizers, and schedulers for clients
     global_model = IsacHetNetFL(
@@ -259,6 +260,7 @@ if __name__ == '__main__':
         out_channels=hidden_channels,
         aug_feat_dim=aug_ue_dim,  # DS, PC, UI, rate_without_me + 3?
         aug_feat_dim_ap=aug_ap_dim,  # global sinr
+        aug_feat_dim_sr=aug_sr_dim,
         num_layers=num_gnn_layers,
         hid_layers=hidden_channels//2,
     ).to(device)
@@ -277,6 +279,7 @@ if __name__ == '__main__':
             out_channels=hidden_channels,
             aug_feat_dim=aug_ue_dim,
             aug_feat_dim_ap=aug_ap_dim,  # global sinr
+            aug_feat_dim_sr=aug_sr_dim,
             num_layers=num_gnn_layers,
             hid_layers=hidden_channels//2,
             isDecentralized=False
@@ -584,7 +587,15 @@ if __name__ == '__main__':
 
 
 
-print(f' Test local crlb in loss (no clientRespons pack, globla CRLB in UE) ')
+print(f'adding globla CRLB in SR') #  200 => 93%, 500 =>
+# print(f'Only mean SR embedding in SR') # 2ith 200 data => 91.78%
 
+print(f'Option 2 in the derivation sensing pack')
+
+# Option 1 + 500 data => 95.19%
+# Option 2 + 500 data => 95.14%
+# Option 1 + 200 data => 93.01%
+# Option 2 + 200 data => 91.77%
+print("500 data")
 ## Todo: Check on the benchmark
 # Try not using the DS/PC/UI when local training (using MLP to predict using GAP feature)
