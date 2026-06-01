@@ -368,15 +368,19 @@ def server_return_isac(dataLoader, globalInformation, num_antenna=1, nu=1):
             other_Sb = torch.stack(all_Sb[:client_id] + all_Sb[client_id+1:], dim=1).sum(dim=1)
             other_Sc = torch.stack(all_Sc[:client_id] + all_Sc[client_id+1:], dim=1).sum(dim=1)
             
-            # # Option 1
-            # aug_batch.w_a = (1.0 - nu * other_Sb).to(device)
-            # aug_batch.w_b = (1.0 - nu * other_Sa).to(device)
-            # aug_batch.w_c = (2.0 * nu * other_Sc).to(device)
+            # Option 1
+            w_a = (1.0 - nu * other_Sb).to(device)
+            w_b = (1.0 - nu * other_Sa).to(device)
+            w_c = (2.0 * nu * other_Sc).to(device)
 
-            # Option 2
-            aug_batch.w_a = (1.0 - nu * Sigma_b).to(device)
-            aug_batch.w_b = (1.0 - nu * Sigma_a).to(device)
-            aug_batch.w_c = (2.0 * nu * Sigma_c).to(device)
+            # # Option 2
+            # w_a = (1.0 - nu * Sigma_b).to(device)
+            # w_b = (1.0 - nu * Sigma_a).to(device)
+            # w_c = (2.0 * nu * Sigma_c).to(device)
+
+            aug_batch.w_a = w_a
+            aug_batch.w_b = w_b
+            aug_batch.w_c = w_c
 
 
             aug_batch.global_crlb = global_crlb.to(device)
@@ -583,11 +587,25 @@ def server_return_isac(dataLoader, globalInformation, num_antenna=1, nu=1):
             sr_batch_idx = aug_batch['SR'].batch  # e.g., [0, 0, 1, 1, 2, 2...]
             expanded_crlb = global_crlb[sr_batch_idx].to(device)
 
+            fim_det = Sigma_a * Sigma_b - Sigma_c**2   # [B, 1]  ← FIM determinant
+
+            Sigma_a_expanded = Sigma_a[sr_batch_idx]   # [B * num_SR, 1]
+            Sigma_b_expanded = Sigma_b[sr_batch_idx]
+            Sigma_c_expanded = Sigma_c[sr_batch_idx]
+            fim_det_expanded = fim_det[sr_batch_idx]
+            
             aug_batch['SR'].x = torch.cat(
                 [
                     aug_batch['SR'].x, 
+                    Sigma_a_expanded,
+                    Sigma_b_expanded,
+                    Sigma_c_expanded,
+                    fim_det_expanded,
+                    w_a[sr_batch_idx],   # w_a: [B, 1] → [B*num_SR, 1]
+                    w_b[sr_batch_idx],
+                    w_c[sr_batch_idx],
                     global_sr_context, 
-                    expanded_crlb
+                    # expanded_crlb
                 ],
                 dim=-1
             )
