@@ -22,6 +22,15 @@ from Utils.fl_train_isac import fl_train_isac_sumrate, get_global_info_isac, fl_
 from Utils.fl_train import FedAvg, FedProx
 
 
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["CMU Serif", "DejaVu Serif"],
+    "mathtext.fontset": "cm",
+    "font.size": 12,
+    "axes.unicode_minus": False,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
 
 SAVE_DIR = '.results/isac_sumrate'
 MODEL_DIR = SAVE_DIR + "/models/"
@@ -433,8 +442,11 @@ if __name__ == '__main__':
         plt.legend()
         plt.tight_layout()
         figure_name = f'{timestamp}_fl'
-        save_path = TRAIN_DIR + f'{figure_name}.png' 
-        plt.savefig(save_path, dpi=300) 
+        save_path = TRAIN_DIR + f'{figure_name}.' + f'{args.filetype}' 
+        if args.filetype == 'pdf':
+            plt.savefig(save_path, format='pdf', bbox_inches='tight')    
+        else:
+            plt.savefig(save_path, dpi=300) 
 
         
     else:
@@ -507,8 +519,11 @@ if __name__ == '__main__':
         plt.legend()
         plt.tight_layout()
         figure_name = f'{timestamp}_cen'
-        save_path = TRAIN_DIR + f'{figure_name}.png' 
-        plt.savefig(save_path, dpi=300)  
+        save_path = TRAIN_DIR + f'{figure_name}.' + f'{args.filetype}'  
+        if args.filetype == 'pdf':
+            plt.savefig(save_path, format='pdf', bbox_inches='tight')    
+        else:
+            plt.savefig(save_path, dpi=300)  
         
         model_filename = f'{MODEL_DIR}/{timestamp}_cen.pth'
         torch.save(cen_model.state_dict(), model_filename)
@@ -581,8 +596,12 @@ if __name__ == '__main__':
         plt.grid()
         
         figure_name = f'{timestamp}_eval' 
-        eval_path = EVAL_DIR + f'/{figure_name}.png' 
-        plt.savefig(eval_path, dpi=300, bbox_inches='tight')
+        # eval_path = EVAL_DIR + f'/{figure_name}.png' 
+        eval_path = EVAL_DIR + f'/{figure_name}.'  + f'{args.filetype}'  
+        if args.filetype == 'pdf':
+            plt.savefig(eval_path, format='pdf', bbox_inches='tight')    
+        else:
+            plt.savefig(eval_path, dpi=300, bbox_inches='tight')
         print(f'Save Evaluation figure to {eval_path}.')
 
 
@@ -597,7 +616,9 @@ print(f'Option 2 in the derivation sensing pack')
 # Option 1 + 200 data => 93.01%
 # Option 2 + 200 data => 91.77%
 
-print("Add more in SR aug (now 7)")
+# Option 2 + more in SR aug + 500 data => 98.32%
+# same above but expanded_crlb, crlb_margin, => 97.02%
+print("Add more in SR aug:  (now 7)")
 
 ## Todo: Check on the benchmark
 # Try not using the DS/PC/UI when local training (using MLP to predict using GAP feature)

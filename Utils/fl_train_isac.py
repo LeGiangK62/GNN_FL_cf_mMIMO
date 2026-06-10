@@ -593,7 +593,26 @@ def server_return_isac(dataLoader, globalInformation, num_antenna=1, nu=1):
             Sigma_b_expanded = Sigma_b[sr_batch_idx]
             Sigma_c_expanded = Sigma_c[sr_batch_idx]
             fim_det_expanded = fim_det[sr_batch_idx]
-            
+
+            # Test
+            # 1
+            crlb_margin = -expanded_crlb
+
+            # 2
+            local_Sa_k = all_Sa[client_id][:,0]  # [B, 1]
+            local_Sb_k = all_Sb[client_id][:,0]
+            local_Sc_k = all_Sc[client_id][:,0]
+
+            sa_ratio = (local_Sa_k / (Sigma_a + 1e-9))[sr_batch_idx]  # [B*num_SR, 1]
+            sb_ratio = (local_Sb_k / (Sigma_b + 1e-9))[sr_batch_idx]
+
+            # 3
+            # global_sr_max = other_SR.max(dim=0).values.to(device)      # [B*num_SR, feat_dim]
+            # global_sr_mean = other_SR.mean(dim=0).to(device)            # [B*num_SR, feat_dim]
+            # global_sr_context = torch.cat([global_sr_mean, global_sr_max], dim=-1)
+
+            # print(global_sr_context.shape)
+
             aug_batch['SR'].x = torch.cat(
                 [
                     aug_batch['SR'].x, 
@@ -605,7 +624,8 @@ def server_return_isac(dataLoader, globalInformation, num_antenna=1, nu=1):
                     w_b[sr_batch_idx],
                     w_c[sr_batch_idx],
                     global_sr_context, 
-                    # expanded_crlb
+                    # expanded_crlb, crlb_margin,
+                    # sa_ratio, sb_ratio
                 ],
                 dim=-1
             )

@@ -120,4 +120,6 @@ python main_ISAC.py --num_train 500 --num_test 500 --num_eval 500 --num_ap 30 --
 # No other sensing part in loss function - only local observation
 python main_ISAC.py --num_train 500 --num_test 500 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 64 --num_gnn_layers 3  --num_epochs 1 --num_rounds 150 --batch_size 32 --lr 1e-4  --client_fraction 1.0 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.2 --fl_pretrain 26_05_22_11_27_05_fl
 
+python main_ISAC.py --num_train 500 --num_test 100 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 64 --num_gnn_layers 3  --num_epochs 1 --num_rounds 150 --batch_size 32 --lr 1e-4  --client_fraction 1.0 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.2  --fl_pretrain 26_05_23_15_17_12_fl --cen_pretrain 26_05_23_15_17_12_cen 
+
 ```
