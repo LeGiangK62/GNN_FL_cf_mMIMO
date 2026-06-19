@@ -395,7 +395,7 @@ def train_round(ap_loaders, sensing_loader, M, server_model, server_opt,
 
 
 @torch.no_grad()
-def evaluate(ap_loaders, sensing_loader, M, server_model, local_models,
+def evaluate_old(ap_loaders, sensing_loader, M, server_model, local_models,
              tau, rho_d, num_antenna, comm_rounds, device, use_kg=True):
     for m in local_models:
         m.eval()
@@ -428,7 +428,7 @@ def evaluate(ap_loaders, sensing_loader, M, server_model, local_models,
     return torch.cat(sum_rates, dim=0)                            # [num_samples]
 
 
-def loss_function(client_batch, edge_attr_dict, tau, rho_d, num_antenna, alpha=0.1):
+def loss_function_old(client_batch, edge_attr_dict, tau, rho_d, num_antenna, alpha=0.1):
     """Purely-LOCAL sum-rate surrogate for one client (AP).
 
     Maximise this AP's own desired signal and penalise the interference it
@@ -447,7 +447,32 @@ def loss_function(client_batch, edge_attr_dict, tau, rho_d, num_antenna, alpha=0
         + (alpha * weight * local_interf_per_ue).sum(dim=1).mean()
     return loss
 
-def train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
+
+def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg, alpha=0.1):
+    """Purely-LOCAL sum-rate surrogate for one client (AP).
+
+    Maximise this AP's own desired signal and penalise the interference it
+    creates -- using ONLY its own DS/PC/UI.  No DS/PC/UI is exchanged between
+    clients (unlike the global-rate loss in the old scheme).
+
+        loss = -sum_k DS_k  +  alpha * sum_k (PC_k + UI_k)
+    """
+    DS_k, PC_k, UI_k = compute_components(
+        client_batch, edge_attr_dict, tau, rho_d, num_antenna)      # [B,1,K], [B,1,K,K] x2
+
+    local_interf_per_ue = PC_k.sum(dim=2) + UI_k.sum(dim=2)          # [B, 1, K]
+
+    weight = 1  # prev version weighted by the global rate; here we stay purely local
+    ds_weight = kg[:, :, -2].detach().unsqueeze(-1) # [B, 1, 1]
+    int_weight = kg[:, :, -1].detach().unsqueeze(-1) # [B, 1, 1]
+
+
+    loss = -(ds_weight * DS_k).sum(dim=1).mean() \
+        + (alpha * int_weight * local_interf_per_ue).sum(dim=1).mean()
+
+    return loss
+
+def train_round_old(ap_loaders, sensing_loader, M, server_model, server_opt,
                     local_models, optimizers, selected,
                     tau, rho_d, num_antenna, comm_rounds, device,
                     ctde=False, lam=0.2, use_kg=True):
@@ -515,8 +540,20 @@ def train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
                     kg_arg, attn_ci = None, None                   # KG disabled (ablation)
                 _, edge_attr_dict, _ = local_models[ci](
                     client_batches[ci], kg_emb=kg_arg, kg_attn=attn_ci)
-                loss = loss_function(client_batches[ci], edge_attr_dict,
+                loss = loss_function_old(client_batches[ci], edge_attr_dict,
                                      tau, rho_d, num_antenna)
+                # loss = loss_function_new(
+                #     ci=ci,
+                #     client_batches=client_batches,
+                #     edge_attr_dict_ci=edge_attr_dict,
+                #     ds_all=ds_all,
+                #     pc_all=pc_all,
+                #     ui_all=ui_all,
+                #     tau=tau,
+                #     rho_d=rho_d,
+                #     num_antenna=num_antenna,
+                #     alpha=0.0,
+                # )
                 loss.backward()
 
         if server_opt is not None:
@@ -525,3 +562,200 @@ def train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
         for ci in selected:
             torch.nn.utils.clip_grad_norm_(local_models[ci].parameters(), 1.0)
             optimizers[ci].step()
+
+
+def train_round_old(
+        ap_loaders, sensing_loader, M, server_model, server_opt,
+        local_models, optimizers, selected,
+        tau, rho_d, num_antenna, comm_rounds, device,
+        ctde=False, lam=0.2, use_kg=True
+    ):
+    for m in local_models:
+        m.train()
+    server_model.train()
+
+    for batch_tuple in zip(*ap_loaders, sensing_loader):
+        client_batches = [b.to(device) for b in batch_tuple[:M]]
+        server_b = batch_tuple[M].to(device)                       # AP<->SR graph batch
+
+        # ----- Phase 1: clients build AP embeddings + DS/PC/UI (detached, sent up) -----
+        # No gradients here: this is the uplink summary each client ships to the server.
+        with torch.no_grad():
+            outs = [local_models[i](b) for i, b in enumerate(client_batches)]
+            ap_emb = torch.stack([o[0]["AP"] for o in outs], dim=1)  # [B, M, F]
+            ds_all, pc_all, ui_all = phase1_components(outs, client_batches,
+                                                       tau, rho_d, num_antenna)
+
+        # ----- Phase 2: server fuses everything into the knowledge graph -----
+        if server_opt is not None:
+            server_opt.zero_grad()
+        for ci in selected:
+            optimizers[ci].zero_grad()
+
+        # gap : per-AP KG row [B, M, F+2] (embedding + leave-one-out & full rate)
+        # attn: pairwise AP->AP weights [B, M, M] (conv server) or None (param-free)
+        gap, attn = (server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
+                     if use_kg else (None, None))
+
+        # ----- Phase 3: each (selected) client conditions on the KG and trains -----
+        if ctde:
+            # Centralised training, decentralised execution: forward ALL M clients
+            # (with grad) so the GLOBAL coherent sum rate can be assembled in memory.
+            # Nothing global is communicated at deploy time -- this is the train-side only.
+            DS_all, PC_all, UI_all = [], [], []
+            local_loss, alpha = 0.0, 0.1
+            for i in range(M):
+                kg_arg, attn_i = _kg_for_client(gap, attn, i, server_model.param_free)
+                _, edge_attr_dict, _ = local_models[i](
+                    client_batches[i], kg_emb=kg_arg, kg_attn=attn_i)
+                DS_k, PC_k, UI_k = compute_components(client_batches[i], edge_attr_dict,
+                                                      tau, rho_d, num_antenna)
+                DS_all.append(DS_k); PC_all.append(PC_k); UI_all.append(UI_k)
+                if i in selected:                                  # local regulariser
+                    interf = PC_k.sum(dim=2) + UI_k.sum(dim=2)     # [B, 1, K]
+                    local_loss = local_loss - DS_k.sum(dim=1).mean() \
+                        + alpha * interf.sum(dim=1).mean()
+            rate = global_sum_rate(DS_all, PC_all, UI_all, num_antenna).mean()
+            loss = -rate + lam * local_loss
+            loss.backward()
+        else:
+            # Decentralised (default): each selected client trains on its OWN
+            # purely-local loss; nothing global is ever assembled.
+            for ci in selected:
+                kg_arg, attn_ci = _kg_for_client(gap, attn, ci, server_model.param_free)
+                _, edge_attr_dict, _ = local_models[ci](
+                    client_batches[ci], kg_emb=kg_arg, kg_attn=attn_ci)
+                loss = loss_function_old(client_batches[ci], edge_attr_dict,
+                                         tau, rho_d, num_antenna)
+                loss.backward()
+
+        # ----- Optimiser step (server grads accumulate across clients; FedAvg by caller) -----
+        if server_opt is not None:
+            torch.nn.utils.clip_grad_norm_(server_model.parameters(), 1.0)
+            server_opt.step()
+        for ci in selected:
+            torch.nn.utils.clip_grad_norm_(local_models[ci].parameters(), 1.0)
+            optimizers[ci].step()
+
+
+
+def train_round_new(
+        ap_loaders, sensing_loader, M, server_model, server_opt,
+        local_models, optimizers, selected,
+        tau, rho_d, num_antenna, comm_rounds, device,
+        ctde=False, lam=0.2, use_kg=True
+    ):
+    for m in local_models:
+        m.train()
+    server_model.train()
+
+    for batch_tuple in zip(*ap_loaders, sensing_loader):
+        client_batches = [b.to(device) for b in batch_tuple[:M]]
+        server_b = batch_tuple[M].to(device)        
+
+
+        # Phase 1: Client create initial AP embedding from local data
+        with torch.no_grad():
+            outs = [local_models[i](b) for i, b in enumerate(client_batches)]
+            ap_emb = torch.stack([o[0]["AP"] for o in outs], dim=1)  # [B, M, F]
+            ds_all, pc_all, ui_all = phase1_components(outs, client_batches,
+                                                       tau, rho_d, num_antenna)
+            
+            ds_emb = torch.concatenate(ds_all, dim=1).sum(dim=2).unsqueeze(-1)
+            pc_emb = torch.concatenate(pc_all, dim=1).sum(dim=(2,3)).unsqueeze(-1)
+            ui_emb = torch.concatenate(ui_all, dim=1).sum(dim=(2,3)).unsqueeze(-1)
+            ap_emb = torch.concatenate(
+                [ap_emb, ds_emb, pc_emb, ui_emb],
+                dim=2
+            )
+
+        # Phase 2: Server create the KG 
+        if server_opt is not None:
+            server_opt.zero_grad()
+        for ci in selected:
+            optimizers[ci].zero_grad()
+
+        # Phase 3: train each selected client with its own local loss.
+        # Recompute the server KG per client so each backward has an independent
+        # autograd graph; this avoids both retain_graph=True and a large summed
+        # multi-client loss.
+        for ci in selected:
+            if use_kg:
+                gap, _ = server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
+                gap_ci = torch.cat(
+                    [gap[:, :ci], gap[:, ci+1:]],
+                    dim=1,
+                )
+                ci_ap = gap[:, ci].unsqueeze(1)
+                _, edge_attr_dict, _ = local_models[ci](
+                    client_batches[ci], kg_emb=gap_ci)
+                loss = loss_function_new(client_batches[ci], edge_attr_dict,
+                                         tau, rho_d, num_antenna, kg=ci_ap)
+            else:
+                _, edge_attr_dict, _ = local_models[ci](client_batches[ci])
+                loss = loss_function_old(client_batches[ci], edge_attr_dict,
+                                         tau, rho_d, num_antenna)
+            loss.backward()
+
+
+        # ----- Optimiser step (server grads accumulate across clients; FedAvg by caller) -----
+        if server_opt is not None:
+            torch.nn.utils.clip_grad_norm_(server_model.parameters(), 1.0)
+            server_opt.step()
+        for ci in selected:
+            torch.nn.utils.clip_grad_norm_(local_models[ci].parameters(), 1.0)
+            optimizers[ci].step()
+
+
+@torch.no_grad()
+def evaluate(ap_loaders, sensing_loader, M, server_model, local_models,
+             tau, rho_d, num_antenna, comm_rounds, device, use_kg=True):
+    for m in local_models:
+        m.eval()
+    server_model.eval()
+
+    sum_rates = []
+    for batch_tuple in zip(*ap_loaders, sensing_loader):
+        client_batches = [b.to(device) for b in batch_tuple[:M]]
+        server_b = batch_tuple[M].to(device)                       # AP<->SR graph batch
+
+
+        # Phase 1: Client create initial AP embedding from local data
+        with torch.no_grad():
+            outs = [local_models[i](b) for i, b in enumerate(client_batches)]
+            ap_emb = torch.stack([o[0]["AP"] for o in outs], dim=1)  # [B, M, F]
+            ds_all, pc_all, ui_all = phase1_components(outs, client_batches,
+                                                       tau, rho_d, num_antenna)
+            
+            ds_emb = torch.concatenate(ds_all, dim=1).sum(dim=2).unsqueeze(-1)
+            pc_emb = torch.concatenate(pc_all, dim=1).sum(dim=(2,3)).unsqueeze(-1)
+            ui_emb = torch.concatenate(ui_all, dim=1).sum(dim=(2,3)).unsqueeze(-1)
+            ap_emb = torch.concatenate(
+                [ap_emb, ds_emb, pc_emb, ui_emb],
+                dim=2
+            )
+
+        # Phase 2: Server create the KG 
+        gap, attn = (server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
+                    if use_kg else (None, None))
+        # gap = gap.detach()
+
+        # Phase 3: Client models train using the local data and the KG
+        DS_all, PC_all, UI_all, ap_list = [], [], [], []
+        for ci, b in enumerate(client_batches): 
+            if use_kg:
+                gap_ci = torch.cat(
+                    [gap[:, :ci], gap[:, ci+1:]],
+                    dim = 1
+                )
+                # ci_ap = gap[:, ci].unsqueeze(1)
+
+                x_dict, edge_attr_dict, _ = local_models[ci](b, kg_emb=gap_ci)
+            else:
+                x_dict, edge_attr_dict, _ = local_models[ci](b)
+            DS_k, PC_k, UI_k = compute_components(b, edge_attr_dict, tau, rho_d, num_antenna)
+            DS_all.append(DS_k); PC_all.append(PC_k); UI_all.append(UI_k)
+            ap_list.append(x_dict["AP"])
+        ap_emb = torch.stack(ap_list, dim=1)                   # refine for next comm round
+        sum_rates.append(global_sum_rate(DS_all, PC_all, UI_all, num_antenna))
+    return torch.cat(sum_rates, dim=0)    # [num_samples]

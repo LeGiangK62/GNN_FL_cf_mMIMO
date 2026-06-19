@@ -23,7 +23,7 @@ def server_gap_dim(feat_dim):
 
     gap = [ embedding(F) | rate_without_this_AP(1) | full_global_rate(1) ] -> F+2.
     """
-    return feat_dim + 2
+    return feat_dim + 4
 
 
 # feature widths of the server AP<->SR graph (kept in sync between the graph
@@ -96,7 +96,10 @@ class ClientGNN(nn.Module):
         if kg_emb is not None:
             if kg_emb.dim() == 3:                       # [B, M, F+2] + kg_attn [B, M]
                 msg = self.kg_proj(kg_emb)              # [B, M, F]
-                ctx = (kg_attn.unsqueeze(-1) * msg).sum(dim=1)   # [B, F]
+                if kg_attn is not None:
+                    ctx = (kg_attn.unsqueeze(-1) * msg).sum(dim=1)   # [B, F]
+                else:
+                    ctx = msg.sum(dim=1)   # [B, F]
             else:                                       # [B, F+2] this AP's own gap row
                 ctx = self.kg_proj(kg_emb)              # [B, F]
             x_dict["AP"] = x_dict["AP"] + ctx
@@ -152,7 +155,7 @@ class ServerGNN(nn.Module):
         self.ap_enc = MLP([SERVER_AP_FEAT_DIM, hid, F], batch_norm=True, dropout_prob=0.1)
         self.sr_enc = MLP([SERVER_SR_FEAT_DIM, hid, F], batch_norm=True, dropout_prob=0.1)
         self.tar_enc = MLP([SERVER_TAR_FEAT_DIM, hid, F], batch_norm=True, dropout_prob=0.1)
-        self.ap_emb_proj = Lin(F, F)
+        self.ap_emb_proj = Lin(F+3, F)
 
         node = {"AP": F, "SR": F, "TARGET": F}
         init = {"AP": 0, "SR": 0, "TARGET": 0}
@@ -189,21 +192,38 @@ class ServerGNN(nn.Module):
         B, M, _ = ap_emb.shape
         F = self.feat_dim
 
+        ds_client = ap_emb[:,:,-3:-2]
+        pc_client = ap_emb[:,:,-2:-1]
+        ui_client = ap_emb[:,:,-1:]
+
         # rate signals the server hands back (detached features describing state)
         rate_wo, full = self._rates(ds, pc, ui, num_antenna, M)               # [B,M], [B]
         rate_wo_e = rate_wo.unsqueeze(-1)                                     # [B, M, 1]
-        full_e = full.view(B, 1, 1).expand(B, M, 1)                          # [B, M, 1]
+        full_e = full.view(B, 1, 1).expand(B, M, 1)      
+        
+        
+        # gap = torch.cat([ha, rate_wo_e, full_e], dim=-1)                     # [B, M, F+2]
+        eps = 1e-9
+        local_DS = ds_client                              # [B, K, 1]
+        total_DS = local_DS.sum(dim=1, keepdim=True)      # [B, 1, 1]
+
+        contribution_ratio = local_DS / (total_DS + eps)  # [B, K, 1]
+        
+
+        local_interf = pc_client + ui_client
+        total_Interf = local_interf.sum(dim=1, keepdim=True)
+        interference_share = (local_interf / (total_Interf + eps))                    # [B, M, 1]
 
         if self.param_free:
             emb = ap_emb[..., :F]                                            # pass-through
-            gap = torch.cat([emb, rate_wo_e, full_e], dim=-1)               # [B, M, F+2]
+            gap = torch.cat([emb, rate_wo_e, full_e, contribution_ratio, interference_share], dim=-1)               # [B, M, F+2]
             return gap, None
 
         x_dict = server_batch.x_dict
         edge_index_dict = server_batch.edge_index_dict
         edge_attr_dict = server_batch.edge_attr_dict
 
-        x_dict["AP"] = self.ap_enc(x_dict["AP"]) + self.ap_emb_proj(ap_emb.reshape(B * M, F))
+        x_dict["AP"] = self.ap_enc(x_dict["AP"]) + self.ap_emb_proj(ap_emb.reshape(B * M, F + 3))
         x_dict["SR"] = self.sr_enc(x_dict["SR"])
         x_dict["TARGET"] = self.tar_enc(x_dict["TARGET"])
 
@@ -219,5 +239,7 @@ class ServerGNN(nn.Module):
         hj = ha.unsqueeze(1).expand(B, M, M, F)
         attn = torch.sigmoid(self.attn_lin(torch.cat([hi, hj], dim=-1))).squeeze(-1)  # [B, M, M]
 
-        gap = torch.cat([ha, rate_wo_e, full_e], dim=-1)                     # [B, M, F+2]
+        
+
+        gap = torch.cat([ha, rate_wo_e, full_e, contribution_ratio, interference_share], dim=-1)                     # [B, M, F+4]
         return gap, attn
