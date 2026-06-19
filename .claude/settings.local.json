@@ -5,7 +5,9 @@
       "Bash(npx claude-mem *)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('Utils/fl_kg_isac.py'\\).read\\(\\)\\); print\\('fl_kg_isac syntax OK'\\)\")",
       "Bash(timeout 540 python main_new.py --num_train 8 --num_test 8 --num_eval 8 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 32 --num_gnn_layers 2 --num_rounds 2 --batch_size 4 --lr 1e-3 --client_fraction 1.0 --comm_rounds 1 --fl_scheme fedavg)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('Utils/fl_kg_isac.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('Utils/fl_kg_isac.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(python3 -c \"from Models.GNN import MLP; import inspect; print\\(inspect.getsource\\(MLP\\)\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('Utils/fl_kg_isac.py'\\).read\\(\\)\\); ast.parse\\(open\\('main_new.py'\\).read\\(\\)\\); print\\('syntax OK'\\)\")"
     ]
   },
   "enabledPlugins": {}

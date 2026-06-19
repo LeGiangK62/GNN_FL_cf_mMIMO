@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as Fnn
 import numpy as np
-from torch.nn import Sequential as Seq, Linear as Lin, LayerNorm, LeakyReLU
 from torch.utils.data import Subset
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import DataLoader as GeoLoader
 
-from Models.GNN import APConvLayer, MLP
 
 from Utils.comm import power_from_raw, component_calculate, rate_from_component
+from Models.KG_models import ClientGNN, ServerGNN
 
 # =============================================================================
 # Data : local AP<->UE graphs (client side) + sensing tensor (server side)
@@ -143,10 +143,6 @@ def compute_sensing(ap_cor, sr_cor, rcs, zeta, tar_cor=None):
     return q_all
 
 
-# feature widths of the server AP<->SR graph (kept in sync between the graph
-# builder `make_server_graph` and `ServerGNN`)
-SERVER_AP_FEAT_DIM = 8   # ap_xy(2) + q_a,q_b,q_c(3) + dir-to-target(2) + log-dist(1)
-SERVER_SR_FEAT_DIM = 5   # sr_xy(2) + dir-to-target(2) + log-dist(1)
 
 
 def make_server_graph(ap_cor, sr_cor, rcs, zeta,
@@ -154,13 +150,19 @@ def make_server_graph(ap_cor, sr_cor, rcs, zeta,
     """One sample's server-side AP<->SR bipartite graph (target-aware).
 
     Nodes:
-        AP : [M, 8]  (normalised AP coords, standardised q_a/q_b/q_c,
-                      unit direction to target, log distance to target)
-        SR : [T, 5]  (normalised SR coords, unit direction to target,
-                      log distance to target)
+        AP     : [M, 8]  (normalised AP coords, standardised q_a/q_b/q_c,
+                          unit direction to target, log distance to target)
+        SR     : [T, 5]  (normalised SR coords, unit direction to target,
+                          log distance to target)
+        TARGET : [1, 2]  (normalised target coordinates) -- a single global
+                         hub node every AP/SR connects to.
     Edges:
-        AP --sens_down--> SR   attr = rcs
-        SR --sens_up-->   AP   attr = rcs
+        AP     --sens_down--> SR       attr = rcs
+        SR     --sens_up-->   AP       attr = rcs
+        AP     --ap2tar-->   TARGET    attr = log distance AP->target
+        TARGET --tar2ap-->   AP        attr = log distance AP->target
+        SR     --sr2tar-->   TARGET    attr = log distance SR->target
+        TARGET --tar2sr-->   SR        attr = log distance SR->target
 
     The target (default origin) enters both the Fisher-info features and the
     explicit direction/distance features, so the server reasons about *where*
@@ -191,10 +193,12 @@ def make_server_graph(ap_cor, sr_cor, rcs, zeta,
 
     ap_feat = np.concatenate([ap_norm, q_norm, dir_ap, np.log1p(d_ap)], axis=1).astype(np.float32)
     sr_feat = np.concatenate([sr_norm, dir_sr, np.log1p(d_sr)], axis=1).astype(np.float32)
+    tar_norm = ((tar - ap_mean) / ap_std).astype(np.float32)   # [1, 2]
 
     data = HeteroData()
-    data["AP"].x = torch.tensor(ap_feat, dtype=torch.float32)   # [M, SERVER_AP_FEAT_DIM]
-    data["SR"].x = torch.tensor(sr_feat, dtype=torch.float32)   # [T, SERVER_SR_FEAT_DIM]
+    data["AP"].x = torch.tensor(ap_feat, dtype=torch.float32)       # [M, SERVER_AP_FEAT_DIM]
+    data["SR"].x = torch.tensor(sr_feat, dtype=torch.float32)       # [T, SERVER_SR_FEAT_DIM]
+    data["TARGET"].x = torch.tensor(tar_norm, dtype=torch.float32)  # [1, SERVER_TAR_FEAT_DIM]
 
     # fully connected AP<->SR bipartite edges, weighted by rcs
     ap_sr = [[a, s] for a in range(M) for s in range(T)]       # (a, s) row-major
@@ -204,6 +208,25 @@ def make_server_graph(ap_cor, sr_cor, rcs, zeta,
     rcs_mat = np.asarray(rcs, dtype=np.float32)               # [M, T]
     data["AP", "sens_down", "SR"].edge_attr = torch.tensor(rcs_mat.reshape(-1, 1), dtype=torch.float32)
     data["SR", "sens_up", "AP"].edge_attr = torch.tensor(rcs_mat.T.reshape(-1, 1), dtype=torch.float32)
+
+    # AP<->TARGET and SR<->TARGET edges (single target node, index 0), the
+    # global hub through which all APs/SRs coordinate.  Edge attr = log distance.
+    ap_idx = torch.arange(M, dtype=torch.long)
+    sr_idx = torch.arange(T, dtype=torch.long)
+    zeros_m = torch.zeros(M, dtype=torch.long)
+    zeros_t = torch.zeros(T, dtype=torch.long)
+    d_ap_log = torch.tensor(np.log1p(d_ap), dtype=torch.float32)   # [M, 1]
+    d_sr_log = torch.tensor(np.log1p(d_sr), dtype=torch.float32)   # [T, 1]
+
+    data["AP", "ap2tar", "TARGET"].edge_index = torch.stack([ap_idx, zeros_m], dim=0)
+    data["AP", "ap2tar", "TARGET"].edge_attr = d_ap_log
+    data["TARGET", "tar2ap", "AP"].edge_index = torch.stack([zeros_m, ap_idx], dim=0)
+    data["TARGET", "tar2ap", "AP"].edge_attr = d_ap_log
+
+    data["SR", "sr2tar", "TARGET"].edge_index = torch.stack([sr_idx, zeros_t], dim=0)
+    data["SR", "sr2tar", "TARGET"].edge_attr = d_sr_log
+    data["TARGET", "tar2sr", "SR"].edge_index = torch.stack([zeros_t, sr_idx], dim=0)
+    data["TARGET", "tar2sr", "SR"].edge_attr = d_sr_log
     return data
 
 
@@ -219,6 +242,16 @@ def make_ap_ue_graph(beta_log_ap, gamma_ap, phi, ap_feat):
     data = HeteroData()
     data["AP"].x = torch.tensor(ap_feat[None, :], dtype=torch.float32)   # [1, 2]
     data["UE"].x = torch.tensor(phi, dtype=torch.float32)                # [K, tau]
+
+    # ---- power-free pilot-energy signature (privacy-light interference key) ----
+    # z[t] = sum_{k: pilot t} beta_{m,k} = phi^T @ beta  -> [tau].  No power, no
+    # DS/PC/UI leave the client; <z_m, z_m'> reconstructs the pilot-contamination
+    # coupling between APs at the server.  L2-normalised so the inner product is a
+    # cosine in [0, 1] (beta >= 0), giving well-scaled edge weights.
+    beta = np.expm1(beta_log_ap).astype(np.float32)                      # [K] real gain
+    sig = phi.T.astype(np.float32) @ beta                                # [tau]
+    sig = sig / (np.linalg.norm(sig) + 1e-9)
+    data["AP"].sig = torch.tensor(sig[None, :], dtype=torch.float32)     # [1, tau]
 
     edge_attr = torch.tensor(
         np.stack([beta_log_ap, gamma_ap], axis=1), dtype=torch.float32   # [K, 2]
@@ -280,173 +313,40 @@ def build_split(beta, gamma, phi, ap_cor, sr_cor, rcs, zeta,
 # Models
 # =============================================================================
 
-def smlp(in_dim, out_dim, hid=None):
-    """Small MLP ending in a non-linearity (server dense message passing)."""
-    hid = hid or out_dim
-    return Seq(
-        Lin(in_dim, hid), LayerNorm(hid), LeakyReLU(0.1),
-        Lin(hid, out_dim), LeakyReLU(0.1),
-    )
 
 
-class ClientGNN(nn.Module):
-    """Local AP<->UE GNN held by one client (AP).
 
-    forward(batch, kg_emb=None):
-        kg_emb is None  -> raw pass; returns the AP embedding to send up.
-        kg_emb given    -> KG-conditioned pass; predicts the power allocation.
-    The AP embedding (x_dict['AP']) is returned in both modes.
+def phase1_components(outs, batches, tau, rho_d, num_antenna):
+    """Per-AP Phase-1 DS/PC/UI lists (under the no-KG power) for the server.
+
+    Returns ds, pc, ui : lists of M tensors ([B,1,K], [B,1,K,K], [B,1,K,K]),
+    detached features the server turns into the global / leave-one-out rates.
     """
-
-    def __init__(self, dim_dict, out_channels, num_layers=3, hid_layers=32):
-        super().__init__()
-        self.ue_dim = dim_dict["UE"]
-        self.ap_dim = dim_dict["AP"]
-        self.comm_edge_dim = dim_dict["comm_edge"]
-        self.out_channels = out_channels
-
-        init_comm = {"UE": self.ue_dim, "AP": self.ap_dim, "edge": self.comm_edge_dim}
-        node = {"UE": out_channels, "AP": out_channels}
-
-        # UE -> AP, then AP -> UE (raw edge width grows to out_channels)
-        self.convs_pre = nn.ModuleList([
-            APConvLayer(node, self.comm_edge_dim, out_channels, init_comm,
-                        [("UE", "comm_up", "AP")]),
-            APConvLayer(node, self.comm_edge_dim, out_channels, init_comm,
-                        [("AP", "comm_down", "UE")]),
-        ])
-        # joint AP<->UE refinement (edges are out_channels wide now)
-        self.convs_post = nn.ModuleList([
-            APConvLayer(node, out_channels, out_channels, init_comm,
-                        [("UE", "comm_up", "AP"), ("AP", "comm_down", "UE")])
-            for _ in range(num_layers)
-        ])
-
-        hid = hid_layers
-        self.ue_encoder = MLP([self.ue_dim, hid, out_channels - self.ue_dim],
-                              batch_norm=True, dropout_prob=0.1)
-        self.ap_encoder = MLP([self.ap_dim, hid, out_channels],
-                              batch_norm=True, dropout_prob=0.1)
-        # projects the broadcast knowledge-graph embedding into the AP node
-        self.kg_proj = MLP([out_channels, hid, out_channels],
-                           batch_norm=True, dropout_prob=0.1)
-
-        self.power_edge = nn.Sequential(
-            MLP([out_channels, hid], batch_norm=True, dropout_prob=0.1),
-            Seq(Lin(hid, 1)),
-        )
-
-    def forward(self, batch, kg_emb=None):
-        x_dict = batch.x_dict
-        edge_index_dict = batch.edge_index_dict
-        edge_attr_dict = batch.edge_attr_dict
-
-        x_dict["AP"] = self.ap_encoder(x_dict["AP"])
-        aug_ue = self.ue_encoder(x_dict["UE"])
-        x_dict["UE"] = torch.cat([x_dict["UE"][:, :self.ue_dim], aug_ue], dim=1)
-
-        ## TODO: inject the shared knowledge-graph context into the local AP node
-        # if kg_emb is not None:
-        #     x_dict["AP"] = x_dict["AP"] + self.kg_proj(kg_emb)
-
-        for conv in self.convs_pre:
-            x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
-        for conv in self.convs_post:
-            x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
-
-        edge_power = self.power_edge(edge_attr_dict[("AP", "comm_down", "UE")])
-        edge_attr_dict[("AP", "comm_down", "UE")] = torch.cat(
-            [edge_attr_dict[("AP", "comm_down", "UE")][:, :-1], edge_power], dim=1
-        )
-        return x_dict, edge_attr_dict, edge_index_dict
+    ds, pc, ui = [], [], []
+    for o, b in zip(outs, batches):
+        DS, PC, UI = compute_components(b, o[1], tau, rho_d, num_antenna, flag=True)
+        ds.append(DS); pc.append(PC); ui.append(UI)
+    return ds, pc, ui
 
 
-class ServerGNN(nn.Module):
-    """Trainable knowledge-graph GNN held by the server.
+def _kg_for_client(gap, attn, ci, param_free):
+    """What client ``ci`` receives: own gap row (param-free server) or the full
+    KG + its attention row (conv server).  ``(None, None)`` when KG disabled."""
+    if gap is None:
+        return None, None
+    if param_free:
+        return gap[:, ci, :], None
+    return gap, attn[:, ci, :]
 
-    Input  : the server-side AP<->SR bipartite graph (``make_server_graph``)
-             + the AP embeddings shipped up by the clients.
-        * AP nodes  : sensing/target features (server-owned) FUSED with the
-                      client AP embedding.
-        * SR nodes  : sensing-receiver features (server-owned only).
-        * AP--SR edges carry the rcs weights.
-    Message passing : AP -> SR -> AP (rcs-weighted) couples every AP through the
-             shared sensing receivers / target, then an AP <-> AP step lets the
-             APs coordinate directly.  The result is the shared knowledge graph
-             over AP nodes that is broadcast back to the clients.
-    Output : refined AP embeddings, [B, M, F].
 
-        forward(server_batch, ap_emb)
-            server_batch : batched HeteroData (B graphs, M AP + T SR each)
-            ap_emb       : [B, M, F]  client AP embeddings
-            return       : [B, M, F]  refined AP (knowledge-graph) embeddings
 
-    NOTE: all sub-modules are materialised at construction (no LazyLinear), so
-    an optimizer built right after the constructor tracks every parameter.
-    """
-
-    def __init__(self, feat_dim, sensing_dim=5, hidden=None, num_layers=2):
-        super().__init__()
-        F = feat_dim
-        hid = hidden or feat_dim
-        self.num_layers = num_layers
-
-        # encoders: server node features -> F, and a projection for the client AP embedding
-        self.ap_enc = smlp(SERVER_AP_FEAT_DIM, F, hid)
-        self.sr_enc = smlp(SERVER_SR_FEAT_DIM, F, hid)
-        self.ap_emb_proj = Lin(F, F)
-
-        # per-layer message / update blocks (edge attr = rcs, width 1)
-        self.msg_as = nn.ModuleList([smlp(F + 1, F, hid) for _ in range(num_layers)])  # AP -> SR
-        self.upd_s = nn.ModuleList([smlp(F + F, F, hid) for _ in range(num_layers)])
-        self.msg_sa = nn.ModuleList([smlp(F + 1, F, hid) for _ in range(num_layers)])  # SR -> AP
-        self.upd_a = nn.ModuleList([smlp(F + F, F, hid) for _ in range(num_layers)])
-        self.msg_aa = nn.ModuleList([smlp(F + F, F, hid) for _ in range(num_layers)])  # AP <-> AP
-        self.upd_aa = nn.ModuleList([smlp(F + F, F, hid) for _ in range(num_layers)])
-        self.out = smlp(F, F, hid)
-
-    def forward(self, server_batch, ap_emb):
-        B, M, F = ap_emb.shape
-        eps = 1e-9
-
-        ap_x = server_batch["AP"].x.view(B, M, -1)                       # [B, M, 8]
-        T = server_batch["SR"].x.shape[0] // B
-        sr_x = server_batch["SR"].x.view(B, T, -1)                       # [B, T, 5]
-        rcs = server_batch["AP", "sens_down", "SR"].edge_attr.view(B, M, T)
-        rcs_e = rcs.unsqueeze(-1)                                        # [B, M, T, 1]
-
-        # fuse server sensing features with the client AP embeddings
-        ha = self.ap_enc(ap_x) + self.ap_emb_proj(ap_emb)               # [B, M, F]
-        hs = self.sr_enc(sr_x)                                          # [B, T, F]
-
-        for l in range(self.num_layers):
-            # AP -> SR  (rcs-weighted aggregation over APs)
-            ha_e = ha.unsqueeze(2).expand(B, M, T, F)
-            m_as = self.msg_as[l](torch.cat([ha_e, rcs_e], dim=-1))      # [B, M, T, F]
-            agg_s = (m_as * rcs_e).sum(1) / (rcs.sum(1).unsqueeze(-1) + eps)   # [B, T, F]
-            hs = hs + self.upd_s[l](torch.cat([hs, agg_s], dim=-1))
-
-            # SR -> AP  (rcs-weighted aggregation over SRs)
-            hs_e = hs.unsqueeze(1).expand(B, M, T, F)
-            m_sa = self.msg_sa[l](torch.cat([hs_e, rcs_e], dim=-1))      # [B, M, T, F]
-            agg_a = (m_sa * rcs_e).sum(2) / (rcs.sum(2).unsqueeze(-1) + eps)   # [B, M, F]
-            ha = ha + self.upd_a[l](torch.cat([ha, agg_a], dim=-1))
-
-            # AP <-> AP  (direct coordination -> the shared knowledge graph)
-            hi = ha.unsqueeze(2).expand(B, M, M, F)
-            hj = ha.unsqueeze(1).expand(B, M, M, F)
-            m_aa = self.msg_aa[l](torch.cat([hi, hj], dim=-1))           # [B, M, M, F]
-            agg_aa = m_aa.mean(2)                                        # [B, M, F]
-            ha = ha + self.upd_aa[l](torch.cat([ha, agg_aa], dim=-1))
-
-        return self.out(ha)                                             # [B, M, F]
 
 
 # =============================================================================
 # Rate maths
 # =============================================================================
 
-def compute_components(batch, edge_attr_dict, tau, rho_d, num_antenna):
+def compute_components(batch, edge_attr_dict, tau, rho_d, num_antenna, flag=False):
     """DS / PC / UI for one client's (single-AP) batch."""
     num_graphs = batch.num_graphs
     num_UEs = batch["UE"].x.shape[0] // num_graphs
@@ -460,6 +360,7 @@ def compute_components(batch, edge_attr_dict, tau, rho_d, num_antenna):
 
     power_raw = edge_attr_dict["AP", "comm_down", "UE"].reshape(
         num_graphs, num_APs, num_UEs, -1)[:, :, :, -1]
+    if flag:  power_raw = torch.ones_like(power_raw)
     power = power_from_raw(power_raw, channel_var, num_antenna)
     DS, PC, UI = component_calculate(power, channel_var, large_scale, pilot, rho_d=rho_d)
     return DS, PC, UI                                                 # [B,1,K], [B,1,K,K], [B,1,K,K]
@@ -480,7 +381,8 @@ def global_sum_rate(all_DS, all_PC, all_UI, num_antenna):
 
 def train_round(ap_loaders, sensing_loader, M, server_model, server_opt,
                 local_models, optimizers, selected, fed, global_model,
-                tau, rho_d, num_antenna, comm_rounds, device):
+                tau, rho_d, num_antenna, comm_rounds, device,
+                ctde=False, lam=0.2, use_kg=True):
     """Compatibility entry point used by main_new.py -- runs the 3-phase round.
 
     FedAvg aggregation is performed by the caller (main_new.py) AFTER this
@@ -488,12 +390,13 @@ def train_round(ap_loaders, sensing_loader, M, server_model, server_opt,
     """
     train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
                     local_models, optimizers, selected,
-                    tau, rho_d, num_antenna, comm_rounds, device)
+                    tau, rho_d, num_antenna, comm_rounds, device,
+                    ctde=ctde, lam=lam, use_kg=use_kg)
 
 
 @torch.no_grad()
 def evaluate(ap_loaders, sensing_loader, M, server_model, local_models,
-             tau, rho_d, num_antenna, comm_rounds, device):
+             tau, rho_d, num_antenna, comm_rounds, device, use_kg=True):
     for m in local_models:
         m.eval()
     server_model.eval()
@@ -503,17 +406,18 @@ def evaluate(ap_loaders, sensing_loader, M, server_model, local_models,
         client_batches = [b.to(device) for b in batch_tuple[:M]]
         server_b = batch_tuple[M].to(device)                       # AP<->SR graph batch
 
-        # ----- Phase 1: each client encodes its own local AP<->UE graph -----
-        ap_emb = torch.stack(
-            [local_models[i](b)[0]["AP"] for i, b in enumerate(client_batches)],
-            dim=1,
-        )                                                          # [B, M, F]
+        # ----- Phase 1: AP embedding + DS/PC/UI, sent to the server -----
+        outs = [local_models[i](b) for i, b in enumerate(client_batches)]
+        ap_emb = torch.stack([o[0]["AP"] for o in outs], dim=1)    # [B, M, F]
+        ds_all, pc_all, ui_all = phase1_components(outs, client_batches, tau, rho_d, num_antenna)
 
-        # ----- Phase 2 + 3: server KG, then each client predicts its power -----
-        kg = server_model(server_b, ap_emb)                    # Phase 2
+        # ----- Phase 2 + 3: server KG (+ rates), then each client power -----
+        gap, attn = (server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
+                     if use_kg else (None, None))
         DS_all, PC_all, UI_all, ap_list = [], [], [], []
         for i, b in enumerate(client_batches):                 # Phase 3
-            x_dict, edge_attr_dict, _ = local_models[i](b, kg_emb=kg[:, i, :])
+            kg_i, attn_i = _kg_for_client(gap, attn, i, server_model.param_free)
+            x_dict, edge_attr_dict, _ = local_models[i](b, kg_emb=kg_i, kg_attn=attn_i)
             DS_k, PC_k, UI_k = compute_components(b, edge_attr_dict, tau, rho_d, num_antenna)
             DS_all.append(DS_k); PC_all.append(PC_k); UI_all.append(UI_k)
             ap_list.append(x_dict["AP"])
@@ -545,7 +449,8 @@ def loss_function(client_batch, edge_attr_dict, tau, rho_d, num_antenna, alpha=0
 
 def train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
                     local_models, optimizers, selected,
-                    tau, rho_d, num_antenna, comm_rounds, device):
+                    tau, rho_d, num_antenna, comm_rounds, device,
+                    ctde=False, lam=0.2, use_kg=True):
     """One federated round, run as the explicit 3-phase protocol.
 
     Phase 1 : every client encodes its OWN local AP<->UE graph and produces an
@@ -565,36 +470,58 @@ def train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
         client_batches = [b.to(device) for b in batch_tuple[:M]]
         server_b = batch_tuple[M].to(device)                       # AP<->SR graph batch
 
-        # ----- Phase 1: local AP embeddings (detached, sent to server) -----
+        # ----- Phase 1: AP embeddings + DS/PC/UI (detached, sent to server) -----
         with torch.no_grad():
-            ap_emb = torch.stack(
-                [local_models[i](b)[0]["AP"] for i, b in enumerate(client_batches)],
-                dim=1,
-            )                                                      # [B, M, F]
-            # optional extra comm rounds: refine embeddings through the server KG
-            # for _ in range(max(0, comm_rounds - 1)):
-            #     kg = server_model(server_b, ap_emb)
-            #     ap_emb = torch.stack(
-            #         [local_models[i](b, kg_emb=kg[:, i, :])[0]["AP"]
-            #          for i, b in enumerate(client_batches)],
-            #         dim=1,
-            #     )
+            outs = [local_models[i](b) for i, b in enumerate(client_batches)]
+            ap_emb = torch.stack([o[0]["AP"] for o in outs], dim=1)  # [B, M, F]
+            ds_all, pc_all, ui_all = phase1_components(outs, client_batches,
+                                                       tau, rho_d, num_antenna)
 
-        # ----- Phase 2 + 3: server KG, then each client trains locally -----
-        server_opt.zero_grad()
+        # ----- Phase 2 + 3 -----
+        if server_opt is not None:
+            server_opt.zero_grad()
         for ci in selected:
             optimizers[ci].zero_grad()
 
-        for ci in selected:
-            kg = server_model(server_b, ap_emb)                    # Phase 2 (grad -> server)
-            _, edge_attr_dict, _ = local_models[ci](
-                client_batches[ci], kg_emb=kg[:, ci, :])           # Phase 3 (grad -> client ci)
-            loss = loss_function(client_batches[ci], edge_attr_dict,
-                                 tau, rho_d, num_antenna)          # purely local objective
+        if ctde:
+            # CTDE: forward ALL M clients (with grad) so the GLOBAL coherent sum
+            # rate can be assembled in-memory (no DS/PC/UI is communicated; this
+            # is the centralised-training side -- deploy stays local-only).
+            gap, attn = (server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
+                         if use_kg else (None, None))              # Phase 2
+            DS_all, PC_all, UI_all = [], [], []
+            local_loss, alpha = 0.0, 0.1
+            for i in range(M):
+                kg_arg, attn_i = _kg_for_client(gap, attn, i, server_model.param_free)
+                _, edge_attr_dict, _ = local_models[i](client_batches[i], kg_emb=kg_arg, kg_attn=attn_i)
+                DS_k, PC_k, UI_k = compute_components(client_batches[i], edge_attr_dict,
+                                                      tau, rho_d, num_antenna)
+                DS_all.append(DS_k); PC_all.append(PC_k); UI_all.append(UI_k)
+                if i in selected:                                  # local regulariser
+                    interf = PC_k.sum(dim=2) + UI_k.sum(dim=2)     # [B, 1, K]
+                    local_loss = local_loss - DS_k.sum(dim=1).mean() \
+                        + alpha * interf.sum(dim=1).mean()
+            rate = global_sum_rate(DS_all, PC_all, UI_all, num_antenna).mean()
+            loss = -rate + lam * local_loss
             loss.backward()
+        else:
+            # Decentralised (default): each selected client trains on its OWN
+            # purely-local loss; nothing global is ever assembled.
+            for ci in selected:
+                if use_kg:
+                    gap, attn = server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
+                    kg_arg, attn_ci = _kg_for_client(gap, attn, ci, server_model.param_free)
+                else:
+                    kg_arg, attn_ci = None, None                   # KG disabled (ablation)
+                _, edge_attr_dict, _ = local_models[ci](
+                    client_batches[ci], kg_emb=kg_arg, kg_attn=attn_ci)
+                loss = loss_function(client_batches[ci], edge_attr_dict,
+                                     tau, rho_d, num_antenna)
+                loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(server_model.parameters(), 1.0)
-        server_opt.step()
+        if server_opt is not None:
+            torch.nn.utils.clip_grad_norm_(server_model.parameters(), 1.0)
+            server_opt.step()
         for ci in selected:
             torch.nn.utils.clip_grad_norm_(local_models[ci].parameters(), 1.0)
             optimizers[ci].step()

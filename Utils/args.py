@@ -5,6 +5,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Federated Learning Script")
     
     parser.add_argument("--no_save", action="store_true", default=False, help="No saving anything.")
+    parser.add_argument("--param_free", action="store_true", default=False, help="Server no uses params for KG learning.")
+    parser.add_argument("--ctde", action="store_true", default=False, help="Train on the global coherent sum rate (centralised training, decentralised execution). Off = purely-local loss.")
+    parser.add_argument("--no_kg", action="store_true", default=False, help="Disable the server KG entirely: clients run their local AP<->UE graph with no KG injection (ablation baseline).")
+    parser.add_argument('--lam', type=float, default=0.2, help="Weight of the local term when --ctde is on: L = -global_rate + lam*local_loss.")
     parser.add_argument('--filetype', type=str, choices=['png', 'pdf'], default='png', help="Result files type (pdf or png - default)")
     parser.add_argument('--pre_train', type=str, default=None, help="Path to pre trained model (insinde .results/models/ folder, without '.pt')")
     parser.add_argument("--eval_same_data", action="store_true", default=False, help="Eval on the same with training data.")

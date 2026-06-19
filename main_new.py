@@ -200,12 +200,18 @@ if __name__ == "__main__":
         optimizers.append(opt)
         schedulers.append(torch.optim.lr_scheduler.CosineAnnealingLR(
             opt, T_max=num_rounds, eta_min=1e-5))
-
-    server_model = ServerGNN(out_channels, sensing_dim=5,
-                             hidden=hidden_channels // 2, num_layers=2).to(device)
-    server_opt = torch.optim.AdamW(server_model.parameters(), lr=lr, weight_decay=1e-4)
-    server_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        server_opt, T_max=num_rounds, eta_min=1e-5)
+    
+    server_model = ServerGNN(out_channels, sensing_dim=5, sig_dim=tau,
+                             hidden=hidden_channels // 2, num_layers=2,
+                             kg_edge_mode="inner", param_free=args.param_free).to(device)
+    # ServerGNN is parameter-free (hand-crafted KG) -> no optimizer/scheduler.
+    server_params = list(server_model.parameters())
+    if server_params:
+        server_opt = torch.optim.AdamW(server_params, lr=lr, weight_decay=1e-4)
+        server_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            server_opt, T_max=num_rounds, eta_min=1e-5)
+    else:
+        server_opt, server_sched = None, None
 
     if args.fl_scheme == "fedprox":
         fed = FedProx(client_fraction=client_fraction, mu=args.mu)
@@ -227,7 +233,8 @@ if __name__ == "__main__":
             selected = sample_clients(client_fraction, M)
             train_round(train_aps, train_sens, M, server_model, server_opt,
                         local_models, optimizers, selected, fed, global_model,
-                        tau, rho_d, num_antenna, comm_rounds, device)
+                        tau, rho_d, num_antenna, comm_rounds, device,
+                        ctde=args.ctde, lam=args.lam, use_kg=not args.no_kg)
 
             global_weights = fed.aggregate(global_model, local_models, selected)
             global_model.load_state_dict(global_weights)
@@ -236,13 +243,16 @@ if __name__ == "__main__":
                 
             for ci in selected:
                 schedulers[ci].step()
-            server_sched.step()
+            if server_sched is not None:
+                server_sched.step()
 
             if rnd % eval_round == 0:
                 tr = evaluate(train_aps, train_sens, M, server_model, local_models,
-                              tau, rho_d, num_antenna, comm_rounds, device).mean().item()
+                              tau, rho_d, num_antenna, comm_rounds, device,
+                              use_kg=not args.no_kg).mean().item()
                 te = evaluate(test_aps, test_sens, M, server_model, local_models,
-                              tau, rho_d, num_antenna, comm_rounds, device).mean().item()
+                              tau, rho_d, num_antenna, comm_rounds, device,
+                              use_kg=not args.no_kg).mean().item()
                 fl_train_curve.append(tr)
                 fl_test_curve.append(te)
                 print(f"Round {rnd + 1:03d}/{num_rounds}: "
@@ -333,7 +343,8 @@ if __name__ == "__main__":
     if args.eval_plot:
         print("Evaluation" + "=" * 20)
         fl_rates = evaluate(eval_aps, eval_sens, M, server_model, local_models,
-                            tau, rho_d, num_antenna, comm_rounds, device)
+                            tau, rho_d, num_antenna, comm_rounds, device,
+                            use_kg=not args.no_kg)
         fl_rates = fl_rates.detach().cpu().numpy()
 
         # centralized GNN rates on the eval split
@@ -379,5 +390,3 @@ if __name__ == "__main__":
             plt.savefig(eval_path, dpi=300, bbox_inches="tight")
             print(f"Saved evaluation figure to {eval_path}.")
 
-
-print('No KG~')
