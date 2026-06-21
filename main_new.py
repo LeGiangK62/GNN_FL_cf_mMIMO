@@ -390,3 +390,6 @@ if __name__ == "__main__":
             plt.savefig(eval_path, dpi=300, bbox_inches="tight")
             print(f"Saved evaluation figure to {eval_path}.")
 
+    print("eta = 5, p = 1.5")
+    print("No marginal at all ")
+    print("No net_util in ap embed ")

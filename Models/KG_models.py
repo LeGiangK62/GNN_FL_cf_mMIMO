@@ -21,9 +21,15 @@ def global_sum_rate(all_DS, all_PC, all_UI, num_antenna):
 def server_gap_dim(feat_dim):
     """Width of each AP node in the broadcast KG.
 
-    gap = [ embedding(F) | rate_without_this_AP(1) | full_global_rate(1) ] -> F+2.
+    gap = [ embedding(F) | rate_wo(1) | full_rate(1)
+            | sense_full(1) | sense_marg(1)            # sensing context (CRB)
+            | contribution_ratio(1) | interference_share(1) ]  -> F+6.
+
+    The two comm shares are kept LAST so ``loss_function_new`` keeps reading
+    them at indices -2/-1; the sensing dims are pure context fed through the
+    client's ``kg_proj`` (they are NOT used as loss weights).
     """
-    return feat_dim + 4
+    return feat_dim + 6
 
 
 # feature widths of the server AP<->SR graph (kept in sync between the graph
@@ -81,6 +87,8 @@ class ClientGNN(nn.Module):
             Seq(Lin(hid, 1)),
         )
 
+        self.kg_scale = nn.Parameter(torch.tensor(0.1))
+
     def forward(self, batch, kg_emb=None, kg_attn=None):
         x_dict = batch.x_dict
         edge_index_dict = batch.edge_index_dict
@@ -99,10 +107,12 @@ class ClientGNN(nn.Module):
                 if kg_attn is not None:
                     ctx = (kg_attn.unsqueeze(-1) * msg).sum(dim=1)   # [B, F]
                 else:
-                    ctx = msg.sum(dim=1)   # [B, F]
+                    ctx = msg.mean(dim=1)   # [B, F] # mean
             else:                                       # [B, F+2] this AP's own gap row
                 ctx = self.kg_proj(kg_emb)              # [B, F]
-            x_dict["AP"] = x_dict["AP"] + ctx
+
+            x_dict["AP"] = x_dict["AP"] + self.kg_scale * ctx
+            # x_dict["AP"] = x_dict["AP"] + ctx
 
         for conv in self.convs_pre:
             x_dict, edge_attr_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
@@ -188,6 +198,35 @@ class ServerGNN(nn.Module):
         ], dim=1)                                                             # [B, M]
         return rate_wo, full
 
+    @staticmethod
+    def _sensing(q):
+        """Target-localization CRB signals from per-AP raw Fisher entries.
+
+        Each AP m contributes a 2x2 Fisher Information Matrix for the target
+        position, ``J_m = [[q_a, q_c], [q_c, q_b]]``.  The team FIM is the sum
+        over APs; the localization CRB (position-error bound, LOWER = better) is
+        ``trace(J^-1) = (A+B) / (A*B - C^2)`` with ``A = sum_m q_a`` etc.
+
+            q : [B, M, 3]  raw (>=0) (q_a, q_b, q_c) per AP.
+
+        Returns ``crb_wo`` [B, M] (leave-one-out CRB: localization WITHOUT AP m)
+        and ``crb_full`` [B] (CRB with all APs).  This is the sensing analogue of
+        ``_rates``: ``crb_wo - crb_full`` is how much worse the localization gets
+        if AP m drops out, i.e. AP m's sensing criticality.
+        """
+        eps = 1e-9
+        qa, qb, qc = q[..., 0], q[..., 1], q[..., 2]                          # [B, M]
+        A = qa.sum(dim=1); B = qb.sum(dim=1); C = qc.sum(dim=1)              # [B]
+        det = (A * B - C ** 2).clamp_min(eps)
+        crb_full = (A + B) / det                                             # [B]
+        # leave-one-out: drop AP m's Fisher contribution
+        A_wo = A.unsqueeze(1) - qa                                           # [B, M]
+        B_wo = B.unsqueeze(1) - qb
+        C_wo = C.unsqueeze(1) - qc
+        det_wo = (A_wo * B_wo - C_wo ** 2).clamp_min(eps)
+        crb_wo = (A_wo + B_wo) / det_wo                                      # [B, M]
+        return crb_wo, crb_full
+
     def forward(self, server_batch, ap_emb, ds, pc, ui, num_antenna):
         B, M, _ = ap_emb.shape
         F = self.feat_dim
@@ -200,7 +239,8 @@ class ServerGNN(nn.Module):
         rate_wo, full = self._rates(ds, pc, ui, num_antenna, M)               # [B,M], [B]
         rate_wo_e = rate_wo.unsqueeze(-1)                                     # [B, M, 1]
         full_e = full.view(B, 1, 1).expand(B, M, 1)      
-        
+        # marginal = (full_e - rate_wo_e).clamp_min(0.0)           # [B, M, 1]
+        # marginal = marginal / (marginal.mean(dim=1, keepdim=True) + 1e-9)
         
         # gap = torch.cat([ha, rate_wo_e, full_e], dim=-1)                     # [B, M, F+2]
         eps = 1e-9
@@ -213,10 +253,26 @@ class ServerGNN(nn.Module):
         local_interf = pc_client + ui_client
         total_Interf = local_interf.sum(dim=1, keepdim=True)
         interference_share = (local_interf / (total_Interf + eps))                    # [B, M, 1]
+        net_utility = contribution_ratio - interference_share
+
+        # ---- sensing CONTEXT (not a loss weight): localization CRB from FIM ----
+        # The raw Fisher entries (q_a,q_b,q_c) ride on the AP nodes; CRB is a
+        # function of geometry+RCS only (independent of the power decision), so
+        # it is injected as a context feature the client's kg_proj can use, NOT
+        # as a multiplicative weight on the comm loss.
+        q = server_batch["AP"].q_raw.view(B, M, 3)                          # [B, M, 3]
+        crb_wo, crb_full = self._sensing(q)                                 # [B, M], [B]
+        dcrb = (crb_wo - crb_full.unsqueeze(1)).clamp_min(0.0)              # [B, M] AP sensing criticality
+        sense_full = torch.log1p(crb_full).view(B, 1, 1).expand(B, M, 1)   # [B, M, 1] global, log-compressed
+        sense_marg = torch.log1p(dcrb).unsqueeze(-1)                        # [B, M, 1] per-AP, log-compressed
 
         if self.param_free:
             emb = ap_emb[..., :F]                                            # pass-through
-            gap = torch.cat([emb, rate_wo_e, full_e, contribution_ratio, interference_share], dim=-1)               # [B, M, F+2]
+            # NOTE: comm shares kept LAST so loss_function_new reads them at -2/-1.
+            gap = torch.cat([emb, sense_full, sense_marg, rate_wo_e, full_e, 
+                            #  net_utility, 
+                            #  marginal, 
+                             contribution_ratio, interference_share], dim=-1)   # [B, M, F+6]
             return gap, None
 
         x_dict = server_batch.x_dict
@@ -241,5 +297,9 @@ class ServerGNN(nn.Module):
 
         
 
-        gap = torch.cat([ha, rate_wo_e, full_e, contribution_ratio, interference_share], dim=-1)                     # [B, M, F+4]
+        # comm shares kept LAST so loss_function_new reads them at -2/-1.
+        gap = torch.cat([ha, sense_full, sense_marg, rate_wo_e, full_e, 
+                        #  net_utility, 
+                        #  marginal, 
+                         contribution_ratio, interference_share], dim=-1)            # [B, M, F+6]
         return gap, attn

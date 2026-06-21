@@ -197,6 +197,10 @@ def make_server_graph(ap_cor, sr_cor, rcs, zeta,
 
     data = HeteroData()
     data["AP"].x = torch.tensor(ap_feat, dtype=torch.float32)       # [M, SERVER_AP_FEAT_DIM]
+    # Raw (non-standardised, >=0) per-AP Fisher entries (q_a, q_b, q_c) kept
+    # alongside x so the server can build the localization FIM/CRB directly
+    # (x carries only the z-scored q_norm, which can go negative).
+    data["AP"].q_raw = torch.tensor(q, dtype=torch.float32)         # [M, 3]
     data["SR"].x = torch.tensor(sr_feat, dtype=torch.float32)       # [T, SERVER_SR_FEAT_DIM]
     data["TARGET"].x = torch.tensor(tar_norm, dtype=torch.float32)  # [1, SERVER_TAR_FEAT_DIM]
 
@@ -324,7 +328,7 @@ def phase1_components(outs, batches, tau, rho_d, num_antenna):
     """
     ds, pc, ui = [], [], []
     for o, b in zip(outs, batches):
-        DS, PC, UI = compute_components(b, o[1], tau, rho_d, num_antenna, flag=True)
+        DS, PC, UI = compute_components(b, o[1], tau, rho_d, num_antenna, flag=False)
         ds.append(DS); pc.append(PC); ui.append(UI)
     return ds, pc, ui
 
@@ -462,13 +466,27 @@ def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg,
 
     local_interf_per_ue = PC_k.sum(dim=2) + UI_k.sum(dim=2)          # [B, 1, K]
 
-    weight = 1  # prev version weighted by the global rate; here we stay purely local
     ds_weight = kg[:, :, -2].detach().unsqueeze(-1) # [B, 1, 1]
     int_weight = kg[:, :, -1].detach().unsqueeze(-1) # [B, 1, 1]
+    # marginal = kg[:, :, -3].detach().unsqueeze(-1) # [B, 1, 1]
+
+    # net_delta = kg[:, :, -4].detach().mean(dim=1, keepdim=True).unsqueeze(-1)
+    # alpha_eff = alpha * torch.exp(net_delta).clamp(0.5, 2.0)
+   
+    # combine DS importance
+    ds_eff = ds_weight # * marginal
+    ds_gate = ds_eff / (ds_eff.mean().detach() + 1e-9)
 
 
-    loss = -(ds_weight * DS_k).sum(dim=1).mean() \
-        + (alpha * int_weight * local_interf_per_ue).sum(dim=1).mean()
+    eta = 5.0
+    p = 1.5
+    int_eff = int_weight / (int_weight.mean().detach() + 1e-9)
+    int_gate = torch.exp(eta * int_weight) * int_eff ** p
+
+
+    loss = -(ds_gate * DS_k).sum(dim=1).mean() \
+        + (alpha * int_gate  * local_interf_per_ue).sum(dim=1).mean()
+    # - full_sumrate.mean()
 
     return loss
 
@@ -687,10 +705,14 @@ def train_round_new(
                     dim=1,
                 )
                 ci_ap = gap[:, ci].unsqueeze(1)
+
+                gap_ci = gap_ci - gap[:, ci:ci+1]
                 _, edge_attr_dict, _ = local_models[ci](
                     client_batches[ci], kg_emb=gap_ci)
                 loss = loss_function_new(client_batches[ci], edge_attr_dict,
                                          tau, rho_d, num_antenna, kg=ci_ap)
+                # loss = loss_function_old(client_batches[ci], edge_attr_dict,
+                #                          tau, rho_d, num_antenna)
             else:
                 _, edge_attr_dict, _ = local_models[ci](client_batches[ci])
                 loss = loss_function_old(client_batches[ci], edge_attr_dict,
@@ -748,6 +770,7 @@ def evaluate(ap_loaders, sensing_loader, M, server_model, local_models,
                     [gap[:, :ci], gap[:, ci+1:]],
                     dim = 1
                 )
+                gap_ci = gap_ci - gap[:, ci:ci+1]
                 # ci_ap = gap[:, ci].unsqueeze(1)
 
                 x_dict, edge_attr_dict, _ = local_models[ci](b, kg_emb=gap_ci)
