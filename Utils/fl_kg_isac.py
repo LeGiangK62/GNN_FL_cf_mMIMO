@@ -464,7 +464,10 @@ def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg,
     DS_k, PC_k, UI_k = compute_components(
         client_batch, edge_attr_dict, tau, rho_d, num_antenna)      # [B,1,K], [B,1,K,K] x2
 
-    local_interf_per_ue = PC_k.sum(dim=2) + UI_k.sum(dim=2)          # [B, 1, K]
+
+    local_PC = PC_k.sum(dim=2) 
+    local_UI = UI_k.sum(dim=2)   
+    local_interf_per_ue = 1.0 * local_PC + 1 * local_UI          # [B, 1, K]
 
     ds_weight = kg[:, :, -2].detach().unsqueeze(-1) # [B, 1, 1]
     int_weight = kg[:, :, -1].detach().unsqueeze(-1) # [B, 1, 1]
@@ -474,9 +477,11 @@ def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg,
     # alpha_eff = alpha * torch.exp(net_delta).clamp(0.5, 2.0)
    
     # combine DS importance
+    mu = 1.0
+    q = 1.0
     ds_eff = ds_weight # * marginal
-    ds_gate = ds_eff / (ds_eff.mean().detach() + 1e-9)
-
+    ds_eff = ds_weight / (ds_weight.mean().detach() + 1e-9)
+    ds_gate = torch.exp(mu * ds_weight) * ds_eff ** q
 
     eta = 5.0
     p = 1.5
@@ -699,16 +704,31 @@ def train_round_new(
         # multi-client loss.
         for ci in selected:
             if use_kg:
-                gap, _ = server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
+                gap, attn = server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
                 gap_ci = torch.cat(
                     [gap[:, :ci], gap[:, ci+1:]],
                     dim=1,
                 )
+                if attn is not None:
+                    attn_ci = torch.cat(
+                        [attn[:, ci, :ci], attn[:, ci, ci+1:]],
+                        dim=1,
+                    )
+                    tau_attn = 2.0
+                    attn_ci = torch.softmax(tau_attn * attn_ci, dim=1)
+                else:
+                    # Param Free path
+                    # int_others = gap_ci[:, :, -1]       # [B, M-1]
+                    # tau_attn = 5.0                      # thử 2, 5, 10
+                    # attn_ci = torch.softmax(tau_attn * int_others.detach(), dim=1)
+                    attn_ci = None
+
+
                 ci_ap = gap[:, ci].unsqueeze(1)
 
                 gap_ci = gap_ci - gap[:, ci:ci+1]
                 _, edge_attr_dict, _ = local_models[ci](
-                    client_batches[ci], kg_emb=gap_ci)
+                    client_batches[ci], kg_emb=gap_ci, kg_attn=attn_ci)
                 loss = loss_function_new(client_batches[ci], edge_attr_dict,
                                          tau, rho_d, num_antenna, kg=ci_ap)
                 # loss = loss_function_old(client_batches[ci], edge_attr_dict,

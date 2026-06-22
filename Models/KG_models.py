@@ -105,7 +105,7 @@ class ClientGNN(nn.Module):
             if kg_emb.dim() == 3:                       # [B, M, F+2] + kg_attn [B, M]
                 msg = self.kg_proj(kg_emb)              # [B, M, F]
                 if kg_attn is not None:
-                    ctx = (kg_attn.unsqueeze(-1) * msg).sum(dim=1)   # [B, F]
+                    ctx = (kg_attn.unsqueeze(-1) * msg).mean(dim=1)   # [B, F]
                 else:
                     ctx = msg.mean(dim=1)   # [B, F] # mean
             else:                                       # [B, F+2] this AP's own gap row
@@ -252,8 +252,7 @@ class ServerGNN(nn.Module):
 
         local_interf = pc_client + ui_client
         total_Interf = local_interf.sum(dim=1, keepdim=True)
-        interference_share = (local_interf / (total_Interf + eps))                    # [B, M, 1]
-        net_utility = contribution_ratio - interference_share
+        interference_share = (local_interf / (total_Interf + eps))
 
         # ---- sensing CONTEXT (not a loss weight): localization CRB from FIM ----
         # The raw Fisher entries (q_a,q_b,q_c) ride on the AP nodes; CRB is a
@@ -272,7 +271,8 @@ class ServerGNN(nn.Module):
             gap = torch.cat([emb, sense_full, sense_marg, rate_wo_e, full_e, 
                             #  net_utility, 
                             #  marginal, 
-                             contribution_ratio, interference_share], dim=-1)   # [B, M, F+6]
+                             contribution_ratio, interference_share,
+                            ], dim=-1)   # [B, M, F+6]
             return gap, None
 
         x_dict = server_batch.x_dict
@@ -301,5 +301,6 @@ class ServerGNN(nn.Module):
         gap = torch.cat([ha, sense_full, sense_marg, rate_wo_e, full_e, 
                         #  net_utility, 
                         #  marginal, 
-                         contribution_ratio, interference_share], dim=-1)            # [B, M, F+6]
+                         contribution_ratio, interference_share,
+                        ], dim=-1)            # [B, M, F+6]
         return gap, attn
