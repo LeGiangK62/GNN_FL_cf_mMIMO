@@ -13,6 +13,7 @@ def parse_args():
     parser.add_argument('--pre_train', type=str, default=None, help="Path to pre trained model (insinde .results/models/ folder, without '.pt')")
     parser.add_argument("--eval_same_data", action="store_true", default=False, help="Eval on the same with training data.")
     parser.add_argument("--eval_plot", action="store_true", default=True, help="Eval Visualization (CDF)")
+    parser.add_argument("--latex_table", action="store_true", default=False, help="Latex-ready table")
     
     # System Parameters
     parser.add_argument('--comm_rounds', type=int, default=1, help="Number of Comm rounds")
@@ -45,14 +46,15 @@ def parse_args():
     
     # FL hyperparameters
     parser.add_argument('--fl_pretrain', type=str, default=None, help="Name of FL model to load directly without training")
+    parser.add_argument('--noKG_pretrain', type=str, default=None, help="Name of no KQ FL model to load directly without training")
     
 
     # Centralized hyperparameters
     parser.add_argument('--cen_lr', type=float, default=5e-3, help="Centralized learning rate")
-    parser.add_argument('--num_epochs_cen', type=int, default=50, help="Number of Centralized training epochs")
+    parser.add_argument('--num_epochs_cen', type=int, default=10, help="Number of Centralized training epochs")
     parser.add_argument('--cen_pretrain', type=str, default=None, help="Name of model to load directly without training")
-    parser.add_argument('--cen_hidden_channels', type=int, default=32, help="Number of hidden channels for centralized GNN")
-    parser.add_argument('--cen_num_gnn_layers', type=int, default=3, help="Number of centralized GNN layers")
+    parser.add_argument('--cen_hidden_channels', type=int, default=32 , help="Number of hidden channels for centralized GNN")
+    parser.add_argument('--cen_num_gnn_layers', type=int, default=1, help="Number of centralized GNN layers")
     
     
     # FL Algorithm Parameters

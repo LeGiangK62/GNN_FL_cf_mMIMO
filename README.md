@@ -123,3 +123,76 @@ python main_ISAC.py --num_train 500 --num_test 500 --num_eval 500 --num_ap 30 --
 python main_ISAC.py --num_train 500 --num_test 100 --num_eval 500 --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 64 --num_gnn_layers 3  --num_epochs 1 --num_rounds 150 --batch_size 32 --lr 1e-4  --client_fraction 1.0 --server_lr 0.05 --eval_plot --fl_scheme fedavg  --comm_rounds 2 --alpha 0.2  --fl_pretrain 26_05_23_15_17_12_fl --cen_pretrain 26_05_23_15_17_12_cen 
 
 ```
+
+python main_new.py  --num_train 500 --num_test 100 --num_eval 500  --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1  --hidden_channels 64 --num_gnn_layers 3  --num_rounds 100 --num_epochs 1 --batch_size 32 --lr 1e-4 --client_fraction 0.6  --fl_scheme fedavg  --param_free --fl_pretrain 26_06_29_14_21_57_fl 
+
+## Training
+python main_new.py  --num_train 500 --num_test 50 --num_eval 450   --tau 20 --power_f 0.2 --num_antenna 1  --hidden_channels 64 --num_gnn_layers 3  --num_rounds 100 --num_epochs 1 --batch_size 32 --lr 1e-4 --client_fraction 0.6  --fl_scheme fedavg  --param_free --no_kg --num_ap 100 --num_ue 15
+
+## --num_ap 30 --num_ue 6
+--fl_pretrain  26_06_29_14_21_57_fl
+--cen_pretrain 26_07_07_15_42_24_cen
+--noKG_pretrain 26_07_07_11_55_17_fl
+
+## --num_ap 30 --num_ue 10
+--fl_pretrain  26_07_07_15_27_50_fl
+--cen_pretrain 26_07_07_15_27_50_cen
+--noKG_pretrain 26_07_07_16_27_19_fl
+
+## --num_ap 50 --num_ue 6
+--fl_pretrain  26_07_07_15_36_33_fl
+--cen_pretrain 26_07_07_15_36_33_cen
+--noKG_pretrain 26_07_07_16_43_36_fl
+
+--fl_pretrain  26_07_09_11_09_27_fl
+--cen_pretrain 26_07_09_11_09_27_cen
+--noKG_pretrain 26_07_09_11_09_35_fl
+
+## --num_ap 50 --num_ue 10
+--fl_pretrain  26_07_07_18_01_25_fl
+--cen_pretrain 26_07_07_17_03_58_cen
+--noKG_pretrain 26_07_07_17_03_58_fl
+
+## --num_ap 30 --num_ue 15
+--fl_pretrain  26_07_08_10_02_11_fl
+--cen_pretrain 26_07_08_10_02_11_cen
+--noKG_pretrain 26_07_08_10_02_08_fl
+
+## --num_ap 50 --num_ue 15 !!!!!
+--fl_pretrain  26_07_07_17_14_15_fl
+--cen_pretrain 26_07_07_16_50_10_cen
+--noKG_pretrain 26_07_07_16_50_10_cen
+--num_ap 50 --num_ue 15  --fl_pretrain 26_07_09_10_39_22_fl --cen_pretrain 26_07_09_10_39_22_cen --noKG_pretrain 26_07_09_10_39_05_fl 
+## --num_ap 100 --num_ue 6
+--fl_pretrain  26_07_08_16_32_01_fl
+--cen_pretrain 26_07_08_16_32_01_cen
+--noKG_pretrain 26_07_08_20_45_31_fl
+
+## --num_ap 100 --num_ue 10
+--fl_pretrain  26_07_08_14_08_36_fl
+--cen_pretrain 26_07_08_13_03_55_cen
+--noKG_pretrain 26_07_08_13_03_55_fl
+
+## --num_ap 100 --num_ue 15
+--fl_pretrain  26_07_08_10_36_15_fl
+--cen_pretrain 26_07_08_10_36_15_cen
+--noKG_pretrain 26_07_08_10_36_09_fl
+
+## Evaluating
+
+
+python main_new.py --num_train 10 --num_test 40 --num_eval 950 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 64 --num_gnn_layers 3 --batch_size 32 --param_free --filetype pdf --latex_table \
+--fl_pretrain   26_07_09_13_12_24_fl --cen_pretrain  26_07_09_13_12_24_cen --noKG_pretrain 26_07_09_13_17_34_fl --num_ap 30 --num_ue 6  
+
+
+
+python main_new.py  --num_train 1000 --num_test 100 --num_eval 500  --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1  --hidden_channels 64 --num_gnn_layers 3  --num_rounds 100 --num_epochs 1 --batch_size 32 --lr 1e-4 --client_fraction 0.6  --fl_scheme fedavg  --param_free --no_kg
+
+--fl_pretrain   26_07_09_13_12_24_fl
+--cen_pretrain  26_07_09_13_12_24_cen
+--noKG_pretrain 26_07_09_13_17_34_fl
+
+
+--fl_pretrain   26_07_09_14_11_12_fl
+--cen_pretrain  26_07_09_14_11_12_cen
+--noKG_pretrain 26_07_09_14_11_14_fl

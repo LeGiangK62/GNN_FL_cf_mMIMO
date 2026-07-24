@@ -71,10 +71,12 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
             num_sam, num_ue, num_ap, num_sr, char(datetime('now')));
     
     for n = 1:N
-        if mod(n, max(1, N/50)) == 1
-            fprintf('============== %d/%d ==============  at %s \n', ...
+        %if mod(n, max(1, N/50)) == 1
+        %    fprintf('============== %d/%d ==============  at %s \n', ...
+        %            n, N, char(datetime('now')));
+        %end
+        fprintf('============== %d/%d ==============  at %s \n', ...
                     n, N, char(datetime('now')));
-        end
         
         %% =========== LOCATIONS AND GEOMETRY ===========
         

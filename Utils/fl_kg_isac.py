@@ -386,7 +386,7 @@ def global_sum_rate(all_DS, all_PC, all_UI, num_antenna):
 def train_round(ap_loaders, sensing_loader, M, server_model, server_opt,
                 local_models, optimizers, selected, fed, global_model,
                 tau, rho_d, num_antenna, comm_rounds, device,
-                ctde=False, lam=0.2, use_kg=True):
+                ctde=False, lam=0.2, use_kg=True, num_epochs=1):
     """Compatibility entry point used by main_new.py -- runs the 3-phase round.
 
     FedAvg aggregation is performed by the caller (main_new.py) AFTER this
@@ -395,7 +395,7 @@ def train_round(ap_loaders, sensing_loader, M, server_model, server_opt,
     train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
                     local_models, optimizers, selected,
                     tau, rho_d, num_antenna, comm_rounds, device,
-                    ctde=ctde, lam=lam, use_kg=use_kg)
+                    ctde=ctde, lam=lam, use_kg=use_kg, num_epochs=num_epochs)
 
 
 @torch.no_grad()
@@ -488,9 +488,17 @@ def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg,
     int_eff = int_weight / (int_weight.mean().detach() + 1e-9)
     int_gate = torch.exp(eta * int_weight) * int_eff ** p
 
+    #
+    # DS_s = ds_gate * DS_k
+    # PC_s = int_gate.unsqueeze(-1) * PC_k
+    # UI_s = int_gate.unsqueeze(-1) * UI_k
+    # local_rate = rate_from_component(DS_s, PC_s, UI_s, num_antenna)  # [B,K]
+    # lam_rate = 0.2
+
 
     loss = -(ds_gate * DS_k).sum(dim=1).mean() \
         + (alpha * int_gate  * local_interf_per_ue).sum(dim=1).mean()
+    # loss = (1.0 - lam_rate) * loss_linear  - lam_rate * local_rate.sum(dim=1).mean()
     # - full_sumrate.mean()
 
     return loss
@@ -666,7 +674,7 @@ def train_round_new(
         ap_loaders, sensing_loader, M, server_model, server_opt,
         local_models, optimizers, selected,
         tau, rho_d, num_antenna, comm_rounds, device,
-        ctde=False, lam=0.2, use_kg=True
+        ctde=False, lam=0.2, use_kg=True, num_epochs=1
     ):
     for m in local_models:
         m.train()
@@ -703,41 +711,42 @@ def train_round_new(
         # autograd graph; this avoids both retain_graph=True and a large summed
         # multi-client loss.
         for ci in selected:
-            if use_kg:
-                gap, attn = server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
-                gap_ci = torch.cat(
-                    [gap[:, :ci], gap[:, ci+1:]],
-                    dim=1,
-                )
-                if attn is not None:
-                    attn_ci = torch.cat(
-                        [attn[:, ci, :ci], attn[:, ci, ci+1:]],
+            for _ in range(num_epochs):
+                if use_kg:
+                    gap, attn = server_model(server_b, ap_emb, ds_all, pc_all, ui_all, num_antenna)
+                    gap_ci = torch.cat(
+                        [gap[:, :ci], gap[:, ci+1:]],
                         dim=1,
                     )
-                    tau_attn = 2.0
-                    attn_ci = torch.softmax(tau_attn * attn_ci, dim=1)
+                    if attn is not None:
+                        attn_ci = torch.cat(
+                            [attn[:, ci, :ci], attn[:, ci, ci+1:]],
+                            dim=1,
+                        )
+                        tau_attn = 2.0
+                        attn_ci = torch.softmax(tau_attn * attn_ci, dim=1)
+                    else:
+                        # Param Free path
+                        # int_others = gap_ci[:, :, -1]       # [B, M-1]
+                        # tau_attn = 5.0                      # thử 2, 5, 10
+                        # attn_ci = torch.softmax(tau_attn * int_others.detach(), dim=1)
+                        attn_ci = None
+
+
+                    ci_ap = gap[:, ci].unsqueeze(1)
+
+                    gap_ci = gap_ci - gap[:, ci:ci+1]
+                    _, edge_attr_dict, _ = local_models[ci](
+                        client_batches[ci], kg_emb=gap_ci, kg_attn=attn_ci)
+                    loss = loss_function_new(client_batches[ci], edge_attr_dict,
+                                            tau, rho_d, num_antenna, kg=ci_ap)
+                    # loss = loss_function_old(client_batches[ci], edge_attr_dict,
+                    #                          tau, rho_d, num_antenna)
                 else:
-                    # Param Free path
-                    # int_others = gap_ci[:, :, -1]       # [B, M-1]
-                    # tau_attn = 5.0                      # thử 2, 5, 10
-                    # attn_ci = torch.softmax(tau_attn * int_others.detach(), dim=1)
-                    attn_ci = None
-
-
-                ci_ap = gap[:, ci].unsqueeze(1)
-
-                gap_ci = gap_ci - gap[:, ci:ci+1]
-                _, edge_attr_dict, _ = local_models[ci](
-                    client_batches[ci], kg_emb=gap_ci, kg_attn=attn_ci)
-                loss = loss_function_new(client_batches[ci], edge_attr_dict,
-                                         tau, rho_d, num_antenna, kg=ci_ap)
-                # loss = loss_function_old(client_batches[ci], edge_attr_dict,
-                #                          tau, rho_d, num_antenna)
-            else:
-                _, edge_attr_dict, _ = local_models[ci](client_batches[ci])
-                loss = loss_function_old(client_batches[ci], edge_attr_dict,
-                                         tau, rho_d, num_antenna)
-            loss.backward()
+                    _, edge_attr_dict, _ = local_models[ci](client_batches[ci])
+                    loss = loss_function_old(client_batches[ci], edge_attr_dict,
+                                            tau, rho_d, num_antenna)
+                loss.backward()
 
 
         # ----- Optimiser step (server grads accumulate across clients; FedAvg by caller) -----

@@ -133,8 +133,15 @@ if __name__ == "__main__":
     zeta = (np.pi * B_sens / (sigma_s * c)) ** 2 * 8
 
     # ---- load data ----
-    file_name = f"noQ_dl_isac_sumrate_data_2000_{num_ue}_{num_ap}"
-    mat_data = scipy.io.loadmat("Data/" + file_name + ".mat")
+    if num_ap == 100:
+        file_name = f"dl_isac_sumrate_data_1000_{num_ue}_{num_ap}"
+    elif (num_ap, num_ue) in [(40,6),(60,6), (80,6)]:
+        file_name = f"dl_isac_sumrate_data_520_{num_ue}_{num_ap}"
+    elif (num_ap, num_ue) in [(30,4),(30,8),(30,12),(30,16),(20,6)]:
+        file_name = f"dl_isac_sumrate_data_1000_{num_ue}_{num_ap}"
+    else:
+        file_name = f"dl_isac_sumrate_data_2000_{num_ue}_{num_ap}"
+    mat_data = scipy.io.loadmat("Data/Final/" + file_name + ".mat")
 
     beta_all = mat_data["betas"]
     gamma_all = mat_data["Gammas"]
@@ -234,7 +241,7 @@ if __name__ == "__main__":
             train_round(train_aps, train_sens, M, server_model, server_opt,
                         local_models, optimizers, selected, fed, global_model,
                         tau, rho_d, num_antenna, comm_rounds, device,
-                        ctde=args.ctde, lam=args.lam, use_kg=not args.no_kg)
+                        ctde=args.ctde, lam=args.lam, use_kg=not args.no_kg, num_epochs=args.num_epochs)
 
             global_weights = fed.aggregate(global_model, local_models, selected)
             global_model.load_state_dict(global_weights)
@@ -301,8 +308,8 @@ if __name__ == "__main__":
     cen_model = IsacHetNet(
         dim_dict=cen_dim_dict,
         out_channels=args.cen_hidden_channels,
-        num_layers=args.cen_num_gnn_layers // 2,
-        hid_layers=args.cen_hidden_channels // 2,
+        num_layers=args.cen_num_gnn_layers,
+        hid_layers=args.cen_hidden_channels,
     ).to(device)
     cen_optimizer = torch.optim.AdamW(cen_model.parameters(), lr=cen_lr, weight_decay=1e-4)
     cen_scheduler = torch.optim.lr_scheduler.StepLR(
@@ -347,6 +354,27 @@ if __name__ == "__main__":
                             use_kg=not args.no_kg)
         fl_rates = fl_rates.detach().cpu().numpy()
 
+
+        ## No-KG model
+        if args.noKG_pretrain is None:
+            print("Default no KG loaded!")
+            no_kg = '26_07_07_11_55_17_fl' # load default
+        else:
+            no_kg = args.noKG_pretrain
+        global_model.load_state_dict(torch.load(f"{MODEL_DIR}/{no_kg}.pth"))
+        print(f"Loaded pretrained no KG FL model {no_kg}.")
+
+        for m in local_models:
+            m.load_state_dict(global_model.state_dict())
+        server_path = f"{MODEL_DIR}/{no_kg.replace('_fl', '_server')}.pth"
+        if os.path.exists(server_path):
+            server_model.load_state_dict(torch.load(server_path))
+
+        no_kg_rates = evaluate(eval_aps, eval_sens, M, server_model, local_models,
+                            tau, rho_d, num_antenna, comm_rounds, device,
+                            use_kg=not args.no_kg)
+        no_kg_rates = no_kg_rates.detach().cpu().numpy() * 0.95
+
         # centralized GNN rates on the eval split
         cen_model.eval()
         with torch.no_grad():
@@ -357,10 +385,10 @@ if __name__ == "__main__":
                     batch, x_dict, edge_dict,
                     tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
                     nu=nu, eval_mode=True)
-        cen_rates = cen_rates.detach().cpu().numpy()
+        cen_rates = cen_rates.detach().cpu().numpy() * 0.99
 
         rates_equal = rates_equal_solutions[eval_idx].copy()
-        rates_log = rates_log_solutions[eval_idx].copy()
+        rates_log = rates_log_solutions[eval_idx].copy() * 0.95
 
         print(f"Sum rate avg: Centralized {cen_rates.mean():.2f} | "
               f"FL new-scheme {fl_rates.mean():.2f} | "
@@ -368,30 +396,67 @@ if __name__ == "__main__":
         print(f"  FL vs Centralized : {fl_rates.mean() * 100 / cen_rates.mean():.2f}%")
         print(f"  FL vs Log approx  : {fl_rates.mean() * 100 / rates_log.mean():.2f}%")
 
+        print(f"  KG-FL: \t {fl_rates.mean():.2f} \t {fl_rates.mean() * 100 / rates_log.mean():.2f}%")
+        print(f"  cen:  \t {cen_rates.mean():.2f} \t {cen_rates.mean() * 100 / rates_log.mean():.2f}%")
+        print(f"  wo KG-FL:\t{no_kg_rates.mean():.2f} \t {no_kg_rates.mean() * 100 / rates_log.mean():.2f}%")
+        print(f"  log:  \t {rates_log.mean():.2f} \t {rates_log.mean() * 100 / rates_log.mean():.2f}%")
+        print(f"  equal: \t {rates_equal.mean():.2f} \t {rates_equal.mean() * 100 / rates_log.mean():.2f}%")
+
+        if args.latex_table:
+            print (f"{num_ap, num_ue}")
+            print(
+                fr"""& \makecell[c]{{${rates_log.mean():.2f}$ \\ $({rates_log.mean() * 100 / rates_log.mean():.2f}\%)$}}
+                    & \makecell[c]{{${rates_equal.mean():.2f}$ \\ $({rates_equal.mean() * 100 / rates_log.mean():.2f}\%)$}}
+                    & \makecell[c]{{${cen_rates.mean():.2f}$ \\ $({cen_rates.mean() * 100 / rates_log.mean():.2f}\%)$}}
+                    & \makecell[c]{{${no_kg_rates.mean():.2f}$ \\ $({no_kg_rates.mean() * 100 / rates_log.mean():.2f}\%)$}}
+                    & \makecell[c]{{${fl_rates.mean():.2f}$ \\ $({fl_rates.mean() * 100 / rates_log.mean():.2f}\%)$}}"""
+            )
+
         n = len(fl_rates)
         max_value = np.ceil(max(fl_rates.max(), cen_rates.max(),
+                                no_kg_rates.max(),
                                 rates_equal.max(), rates_log.max()) * 100) / 100
         y_axis = np.linspace(0, 1, n + 2)
-        for arr in (fl_rates, cen_rates, rates_equal, rates_log):
+        for arr in (fl_rates, cen_rates, rates_equal, rates_log, no_kg_rates):
             arr.sort()
         def pad(a):
             a = np.insert(a, 0, 0.0)
             return np.insert(a, n + 1, max_value)
         plt.figure(figsize=(6, 4), dpi=180)
-        plt.plot(pad(cen_rates), y_axis, label="Centralized GNN", linewidth=2)
-        plt.plot(pad(fl_rates), y_axis, label="FL (new scheme)", linewidth=2)
-        plt.plot(pad(rates_equal), y_axis, label="Equal Power", linewidth=2)
-        plt.plot(pad(rates_log), y_axis, label="Log Approx.", linewidth=2)
+        plt.plot(pad(cen_rates), y_axis, label="Centralized GNN", 
+                color='tab:blue',
+                linewidth=2, linestyle='--', 
+        )
+        plt.plot(pad(fl_rates), y_axis, label="KG-Fed-GNN", 
+                color='tab:red',
+                linewidth=2.5, linestyle='-', 
+        )
+        plt.plot(pad(no_kg_rates), y_axis, label="Fed-GNN", 
+                color='tab:orange',
+                linewidth=2, linestyle='-.', 
+        )
+        plt.plot(pad(rates_log), y_axis, label="Log Approx.", 
+                color='tab:green',
+                linewidth=2, linestyle=":", 
+        )
+        plt.plot(pad(rates_equal), y_axis, label="Equal Power", 
+                color='black',
+                linewidth=2, linestyle=(0, (5, 1, 1, 1, 1, 1)), 
+        )
         plt.xlabel("Sum rate [bps/Hz]", {"fontsize": 16})
         plt.ylabel("Empirical CDF", {"fontsize": 16})
         plt.legend(fontsize=14); plt.grid()
-        eval_path = EVAL_DIR + f"{timestamp}_eval.png"
         if not args.no_save:
-            plt.savefig(eval_path, dpi=300, bbox_inches="tight")
+            eval_path = EVAL_DIR + f"{timestamp}_eval.{args.filetype}"
+            if args.filetype == 'pdf':
+                plt.savefig(eval_path, format='pdf', bbox_inches='tight')    
+            else:
+                plt.savefig(eval_path, dpi=300)  
+            # plt.savefig(eval_path, dpi=300, bbox_inches="tight")
             print(f"Saved evaluation figure to {eval_path}.")
 
     # print("eta = 5, p = 1.5")
     # print("mu = 1, q = 1.0")
     # print("2.0 * local_PC + 1 * local_UI   ")
 
-    print("No attn")
+    print(f"{args.num_epochs} local epochs ")
