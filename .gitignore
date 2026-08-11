@@ -1,13 +1,11 @@
 __pycache__/
 
-
 Data/*.mat
 Data/*.pkl
 Data/Final
 .results
 
-.vscode
 Intructions
-
+.vscode
 .agents
 .claude

@@ -1,6 +1,6 @@
 clear;
 clc;
-num_sam=1000; num_ap=30; num_ue=16; num_antenna=1; num_sr=2; nu=1; 
+num_sam=3; num_ap=1; num_ue=1; num_antenna=1; num_sr=2; nu=1; 
 tau=20; power_f=0.2; D=1; f=1900; Hb=15; Hm=1.65; d0=0.01;d1=0.05;
 
 [betas, Gammas, Phii_cf, R_equal, R_frac, R_log, ...
@@ -8,7 +8,7 @@ tau=20; power_f=0.2; D=1; f=1900; Hb=15; Hm=1.65; d0=0.01;d1=0.05;
     rcs_values, ap_locations, sr_locations,...
     q_a_all, q_b_all, q_c_all] = downlink_ISAC_sumrate_data(num_sam, num_ap, num_ue, num_sr, num_antenna, tau, power_f, Hb, Hm, f, d0, d1, D, nu);
                                                                     
-filename = sprintf('dl_isac_sumrate_data_%d_%d_%d.mat', num_sam, num_ue, num_ap);
+filename = sprintf('Final/dl_isac_sumrate_data_%d_%d_%d.mat', num_sam, num_ue, num_ap);
 save(filename,'betas', 'Gammas', 'Phii_cf', 'R_equal', 'R_frac', 'R_log', ...
     'rcs_values', 'ap_locations', 'sr_locations', 'q_a_all', 'q_b_all', 'q_c_all', ...
     'power_eq', 'power_frac', 'power_log');

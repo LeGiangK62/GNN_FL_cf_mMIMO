@@ -1,8 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
 numpy==1.26.4
 matplotlib
 scipy
-torch==2.0.1
-torch-scatter -f https://data.pyg.org/whl/torch-2.0.0+cu118.html
+torch#==2.0.1
+# torch-scatter -f https://data.pyg.org/whl/torch-2.0.0+cu118.html
 # torch-sparse @ https://data.pyg.org/whl/torch-2.0.0+cu118.html
 # torch-cluster @ https://data.pyg.org/whl/torch-2.0.0+cu118.html
 # torch-spline-conv @ https://data.pyg.org/whl/torch-2.0.0+cu118.html

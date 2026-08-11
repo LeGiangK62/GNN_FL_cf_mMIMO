@@ -358,7 +358,7 @@ if __name__ == "__main__":
         ## No-KG model
         if args.noKG_pretrain is None:
             print("Default no KG loaded!")
-            no_kg = '26_07_07_11_55_17_fl' # load default
+            no_kg = args.fl_pretrain # load default
         else:
             no_kg = args.noKG_pretrain
         global_model.load_state_dict(torch.load(f"{MODEL_DIR}/{no_kg}.pth"))
@@ -427,10 +427,11 @@ if __name__ == "__main__":
                 color='tab:blue',
                 linewidth=2, linestyle='--', 
         )
-        plt.plot(pad(fl_rates), y_axis, label="KG-Fed-GNN", 
-                color='tab:red',
-                linewidth=2.5, linestyle='-', 
-        )
+        if args.noKG_pretrain is None:
+            plt.plot(pad(fl_rates), y_axis, label="KG-Fed-GNN", 
+                    color='tab:red',
+                    linewidth=2.5, linestyle='-', 
+            )
         plt.plot(pad(no_kg_rates), y_axis, label="Fed-GNN", 
                 color='tab:orange',
                 linewidth=2, linestyle='-.', 
