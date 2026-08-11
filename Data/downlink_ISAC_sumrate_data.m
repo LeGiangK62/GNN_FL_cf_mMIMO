@@ -424,7 +424,7 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
         % end
 
         b = q_a + q_b;
-        A = q_a * q_b' + q_c * q_c';
+        A = q_a * q_b' - q_c * q_c';
 
         %% =========== POWER ALLOCATION METHODS ===========
         
