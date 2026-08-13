@@ -133,14 +133,16 @@ if __name__ == "__main__":
     zeta = (np.pi * B_sens / (sigma_s * c)) ** 2 * 8
 
     # ---- load data ----
-    if num_ap == 100:
-        file_name = f"dl_isac_sumrate_data_1000_{num_ue}_{num_ap}"
-    elif (num_ap, num_ue) in [(40,6),(60,6), (80,6)]:
-        file_name = f"dl_isac_sumrate_data_520_{num_ue}_{num_ap}"
-    elif (num_ap, num_ue) in [(30,4),(30,8),(30,12),(30,16),(20,6)]:
-        file_name = f"dl_isac_sumrate_data_1000_{num_ue}_{num_ap}"
-    else:
-        file_name = f"dl_isac_sumrate_data_2000_{num_ue}_{num_ap}"
+    # if num_ap == 100:
+    #     file_name = f"dl_isac_sumrate_data_1000_{num_ue}_{num_ap}"
+    # elif (num_ap, num_ue) in [(40,6),(60,6), (80,6)]:
+    #     file_name = f"dl_isac_sumrate_data_520_{num_ue}_{num_ap}"
+    # elif (num_ap, num_ue) in [(30,4),(30,8),(30,12),(30,16),(20,6)]:
+    #     file_name = f"dl_isac_sumrate_data_1000_{num_ue}_{num_ap}"
+    # else:
+    #     file_name = f"dl_isac_sumrate_data_2000_{num_ue}_{num_ap}"
+    file_name = f"dl_isac_sumrate_data_1000_{num_ue}_{num_ap}"
+
     mat_data = scipy.io.loadmat("Data/Final/" + file_name + ".mat")
 
     beta_all = mat_data["betas"]
@@ -241,7 +243,9 @@ if __name__ == "__main__":
             train_round(train_aps, train_sens, M, server_model, server_opt,
                         local_models, optimizers, selected, fed, global_model,
                         tau, rho_d, num_antenna, comm_rounds, device,
-                        ctde=args.ctde, lam=args.lam, use_kg=not args.no_kg, num_epochs=args.num_epochs)
+                        ctde=args.ctde, lam=args.lam, use_kg=not args.no_kg,
+                        num_epochs=args.num_epochs, nu=nu,
+                        crlb_lambda=args.crlb_lambda)
 
             global_weights = fed.aggregate(global_model, local_models, selected)
             global_model.load_state_dict(global_weights)
@@ -373,7 +377,7 @@ if __name__ == "__main__":
         no_kg_rates = evaluate(eval_aps, eval_sens, M, server_model, local_models,
                             tau, rho_d, num_antenna, comm_rounds, device,
                             use_kg=not args.no_kg)
-        no_kg_rates = no_kg_rates.detach().cpu().numpy() * 0.95
+        no_kg_rates = no_kg_rates.detach().cpu().numpy()
 
         # centralized GNN rates on the eval split
         cen_model.eval()
@@ -385,10 +389,10 @@ if __name__ == "__main__":
                     batch, x_dict, edge_dict,
                     tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
                     nu=nu, eval_mode=True)
-        cen_rates = cen_rates.detach().cpu().numpy() * 0.99
+        cen_rates = cen_rates.detach().cpu().numpy()
 
         rates_equal = rates_equal_solutions[eval_idx].copy()
-        rates_log = rates_log_solutions[eval_idx].copy() * 0.95
+        rates_log = rates_log_solutions[eval_idx].copy()
 
         print(f"Sum rate avg: Centralized {cen_rates.mean():.2f} | "
               f"FL new-scheme {fl_rates.mean():.2f} | "

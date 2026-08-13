@@ -1,6 +1,6 @@
 clear;
 clc;
-num_sam=3; num_ap=1; num_ue=1; num_antenna=1; num_sr=2; nu=1; 
+num_sam=2000; num_ap=30; num_ue=6; num_antenna=1; num_sr=2; nu=1; 
 tau=20; power_f=0.2; D=1; f=1900; Hb=15; Hm=1.65; d0=0.01;d1=0.05;
 
 [betas, Gammas, Phii_cf, R_equal, R_frac, R_log, ...
@@ -16,24 +16,28 @@ save(filename,'betas', 'Gammas', 'Phii_cf', 'R_equal', 'R_frac', 'R_log', ...
 
 % 30 6
 % 50 6
+%100 6
 % 30 10
 % 50 10
-% 50 15
-% 30 15
-%100 6
 %100 10
+% 50 15
 %100 15
-
+% 30 4
+% 30 8
+% 30 15
+% 30 16
+% 30 12
 % 40 6
 % 60 6
 % 80 6
-
-
-
-% 30 4
-% 30 8
-% 30 16
-
 % 20 6
 
-% 30 12
+
+
+
+
+
+
+
+
+

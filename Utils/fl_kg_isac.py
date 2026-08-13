@@ -386,7 +386,8 @@ def global_sum_rate(all_DS, all_PC, all_UI, num_antenna):
 def train_round(ap_loaders, sensing_loader, M, server_model, server_opt,
                 local_models, optimizers, selected, fed, global_model,
                 tau, rho_d, num_antenna, comm_rounds, device,
-                ctde=False, lam=0.2, use_kg=True, num_epochs=1):
+                ctde=False, lam=0.2, use_kg=True, num_epochs=1,
+                nu=1.0, crlb_lambda=1.0):
     """Compatibility entry point used by main_new.py -- runs the 3-phase round.
 
     FedAvg aggregation is performed by the caller (main_new.py) AFTER this
@@ -395,7 +396,8 @@ def train_round(ap_loaders, sensing_loader, M, server_model, server_opt,
     train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
                     local_models, optimizers, selected,
                     tau, rho_d, num_antenna, comm_rounds, device,
-                    ctde=ctde, lam=lam, use_kg=use_kg, num_epochs=num_epochs)
+                    ctde=ctde, lam=lam, use_kg=use_kg, num_epochs=num_epochs,
+                    nu=nu, crlb_lambda=crlb_lambda)
 
 
 @torch.no_grad()
@@ -452,7 +454,8 @@ def loss_function_old(client_batch, edge_attr_dict, tau, rho_d, num_antenna, alp
     return loss
 
 
-def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg, alpha=0.1):
+def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg,
+                      alpha=0.1, crlb_loss=None, crlb_lambda=1.0):
     """Purely-LOCAL sum-rate surrogate for one client (AP).
 
     Maximise this AP's own desired signal and penalise the interference it
@@ -498,10 +501,39 @@ def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg,
 
     loss = -(ds_gate * DS_k).sum(dim=1).mean() \
         + (alpha * int_gate  * local_interf_per_ue).sum(dim=1).mean()
+    if crlb_loss is not None:
+        loss = loss + crlb_lambda * crlb_loss
     # loss = (1.0 - lam_rate) * loss_linear  - lam_rate * local_rate.sum(dim=1).mean()
     # - full_sumrate.mean()
 
     return loss
+
+
+def local_power_sensing_sum(client_batch, edge_attr_dict, num_antenna):
+    """Return p_sen for a single-AP client, with gradients when applicable."""
+    B = client_batch.num_graphs
+    K = client_batch["UE"].x.shape[0] // B
+    raw_edge = client_batch["AP", "comm_down", "UE"].edge_attr.reshape(B, 1, K, -1)
+    channel_var = raw_edge[..., 1]
+    power_raw = edge_attr_dict["AP", "comm_down", "UE"].reshape(B, 1, K, -1)[..., -1]
+    sqrt_power = power_from_raw(power_raw, channel_var, num_antenna)
+    return sqrt_power.square().sum(dim=2).squeeze(1)
+
+
+def crlb_block_surrogate(current_p_sen, phase1_p_sen, q_all, client_idx, nu):
+    """Global CRLB hinge with other AP powers fixed to detached phase-1 values.
+
+    This is a block-coordinate surrogate: only ``current_p_sen`` carries a
+    gradient.  The factored FIM determinant avoids constructing a nonsymmetric A.
+    """
+    other_p = phase1_p_sen.detach().clone()
+    other_p[:, client_idx] = 0.0
+    qa, qb, qc = q_all.unbind(dim=-1)
+    sa = (qa * other_p).sum(dim=1) + qa[:, client_idx] * current_p_sen
+    sb = (qb * other_p).sum(dim=1) + qb[:, client_idx] * current_p_sen
+    sc = (qc * other_p).sum(dim=1) + qc[:, client_idx] * current_p_sen
+    violation = sa + sb - nu * (sa * sb - sc.square())
+    return torch.relu(violation).mean()
 
 def train_round_old(ap_loaders, sensing_loader, M, server_model, server_opt,
                     local_models, optimizers, selected,
@@ -674,7 +706,8 @@ def train_round_new(
         ap_loaders, sensing_loader, M, server_model, server_opt,
         local_models, optimizers, selected,
         tau, rho_d, num_antenna, comm_rounds, device,
-        ctde=False, lam=0.2, use_kg=True, num_epochs=1
+        ctde=False, lam=0.2, use_kg=True, num_epochs=1,
+        nu=1.0, crlb_lambda=1.0
     ):
     for m in local_models:
         m.train()
@@ -699,6 +732,11 @@ def train_round_new(
                 [ap_emb, ds_emb, pc_emb, ui_emb],
                 dim=2
             )
+            phase1_p_sen = torch.stack([
+                local_power_sensing_sum(b, o[1], num_antenna)
+                for b, o in zip(client_batches, outs)
+            ], dim=1)
+            q_all = server_b["AP"].q_raw.view(server_b.num_graphs, M, 3)
 
         # Phase 2: Server create the KG 
         if server_opt is not None:
@@ -738,14 +776,25 @@ def train_round_new(
                     gap_ci = gap_ci - gap[:, ci:ci+1]
                     _, edge_attr_dict, _ = local_models[ci](
                         client_batches[ci], kg_emb=gap_ci, kg_attn=attn_ci)
+                    current_p_sen = local_power_sensing_sum(
+                        client_batches[ci], edge_attr_dict, num_antenna)
+                    crlb_loss = crlb_block_surrogate(
+                        current_p_sen, phase1_p_sen, q_all, ci, nu)
                     loss = loss_function_new(client_batches[ci], edge_attr_dict,
-                                            tau, rho_d, num_antenna, kg=ci_ap)
+                                            tau, rho_d, num_antenna, kg=ci_ap,
+                                            crlb_loss=crlb_loss,
+                                            crlb_lambda=crlb_lambda)
                     # loss = loss_function_old(client_batches[ci], edge_attr_dict,
                     #                          tau, rho_d, num_antenna)
                 else:
                     _, edge_attr_dict, _ = local_models[ci](client_batches[ci])
                     loss = loss_function_old(client_batches[ci], edge_attr_dict,
                                             tau, rho_d, num_antenna)
+                    current_p_sen = local_power_sensing_sum(
+                        client_batches[ci], edge_attr_dict, num_antenna)
+                    crlb_loss = crlb_block_surrogate(
+                        current_p_sen, phase1_p_sen, q_all, ci, nu)
+                    loss = loss + crlb_lambda * crlb_loss
                 loss.backward()
 
 

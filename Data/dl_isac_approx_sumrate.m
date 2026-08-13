@@ -1,10 +1,47 @@
-function [rate, rho_opt] = dl_isac_approx_sumrate(Gammaan, BETAAn, PhiPhi, P_max, b, A, nu)
+function [rate, rho_opt] = dl_isac_approx_sumrate( ...
+        Gammaan, BETAAn, PhiPhi, P_max, q_a, q_b, q_c, nu)
+    % Successive convex approximation for the sum-rate problem with the
+    % scalar localization-CRLB constraint
+    %
+    %   (q_a+q_b)'p - nu*((q_a'p)*(q_b'p) - (q_c'p)^2) <= 0.
+    %
+    % CVX cannot use p=sum_square(x,2) inside the indefinite quadratic
+    % expression.  At every iteration we therefore linearize both p=x.^2
+    % and the FIM determinant about the previous feasible point.  The CVX
+    % subproblem then contains an affine CRLB constraint.  A backtracking
+    % step checks the TRUE factored constraint before accepting an update.
     max_iter = 50;
     tol      = 1e-4;
+    trust_radius = 0.35 * sqrt(P_max);
+    fim_eps = 1e-12;
 
     [M,K] = size(Gammaan);
     cur_rho = (P_max / K) * ones(M, K);
+    cur_x = sqrt(cur_rho);
     cur_rate = dl_rate_calculate(cur_rho, Gammaan, BETAAn, PhiPhi);
+
+    p_t = sum(cur_rho, 2);
+    [cur_sigma2, cur_feasible] = local_sigma2(p_t, q_a, q_b, q_c, nu, fim_eps);
+    if ~cur_feasible
+        % Find a feasible sensing-power vector with an exact 2x2 Schur-
+        % complement SDP: W >= inv(F), trace(W) <= nu.  This initialization
+        % is convex because F is affine in p.  Split p equally over UEs only
+        % to obtain the first SCA point; subsequent iterations optimize rate.
+        [p_init, init_ok] = local_feasible_initial_power( ...
+            q_a, q_b, q_c, P_max, nu);
+        if ~init_ok
+            warning('dl_isac_approx_sumrate:InfeasibleProblem', ...
+                ['No feasible CRLB initialization was found ' ...
+                 '(equal-power sigma2=%g, nu=%g).'], cur_sigma2, nu);
+            rho_opt = cur_rho;
+            rate = cur_rate;
+            return;
+        end
+        cur_rho = repmat(p_init / K, 1, K);
+        cur_x = sqrt(cur_rho);
+        cur_rate = dl_rate_calculate(cur_rho, Gammaan, BETAAn, PhiPhi);
+        p_t = p_init;
+    end
     
     for iter = 1:max_iter
         % fprintf('\t iter %d/%d ======= \n', iter, max_iter);
@@ -60,7 +97,9 @@ function [rate, rho_opt] = dl_isac_approx_sumrate(Gammaan, BETAAn, PhiPhi, P_max
             expression inner(K,K)
             expression inner_sq(K,K)
             expression obj
-            expression p_sen(M)
+            expression p_lin(M)
+            expression det_lin
+            expression crlb_lin
         
             sig = sum(x .* Gammaan, 1);
             PC  = sum(BETAAn' * (square(x) .* Gammaan), 2)';
@@ -72,16 +111,29 @@ function [rate, rho_opt] = dl_isac_approx_sumrate(Gammaan, BETAAn, PhiPhi, P_max
         
             denom_expr = 1 + PC + UI;
 
-            p_sen = sum_square(x, 2);
-            crlb = b - nu * A * p_sen;
+            % First-order model of p_m=sum_k x_mk^2 at cur_x.
+            % This is affine in the current CVX variable x.
+            p_lin = 2 * sum(cur_x .* x, 2) - sum(cur_x.^2, 2);
+
+            % First-order model of det(FIM) at p_t, written in factored
+            % scalar form.  Do not construct A.
+            sa_t = q_a' * p_t;
+            sb_t = q_b' * p_t;
+            sc_t = q_c' * p_t;
+            det_t = sa_t * sb_t - sc_t^2;
+            grad_det = q_a * sb_t + q_b * sa_t - 2 * q_c * sc_t;
+            det_lin = det_t + grad_det' * (p_lin - p_t);
+            crlb_lin = (q_a + q_b)' * p_lin - nu * det_lin;
         
             obj = sum(alpha .* (2*log(sig)/log(2) - denom_expr./(log(2)*denom)));
         
             maximize(obj)
             subject to
                 x >= 0
-                crlb <= 0
+                p_lin >= 0
+                crlb_lin <= 0
                 sum_square(x,2) <= P_max
+                norm(x - cur_x, 'fro') <= trust_radius
 
         cvx_end
 
@@ -95,15 +147,39 @@ function [rate, rho_opt] = dl_isac_approx_sumrate(Gammaan, BETAAn, PhiPhi, P_max
             end
             break;
         end
-        new_rho = x.^2;
+        % Backtrack from the previous feasible point until the TRUE CRLB
+        % constraint (not its affine model) is satisfied.
+        eta = 1.0;
+        accepted = false;
+        while eta >= 2^-12
+            trial_x = (1-eta) * cur_x + eta * x;
+            trial_rho = trial_x.^2;
+            trial_p = sum(trial_rho, 2);
+            [~, trial_feasible] = local_sigma2( ...
+                trial_p, q_a, q_b, q_c, nu, fim_eps);
+            if trial_feasible
+                accepted = true;
+                break;
+            end
+            eta = eta / 2;
+        end
+        if ~accepted
+            warning('dl_isac_approx_sumrate:BacktrackingFailed', ...
+                'No feasible SCA step at iteration %d; keeping previous point.', iter);
+            break;
+        end
+
+        new_rho = trial_rho;
         new_rate = dl_rate_calculate(new_rho, Gammaan, BETAAn, PhiPhi);
         if abs(new_rate - cur_rate) / max(abs(cur_rate),1) < tol 
+            cur_rate = new_rate;
+            cur_rho = new_rho;
             break; 
         end
         cur_rate = new_rate;
         cur_rho = new_rho;
-        % eta = 0.5;   % hoặc 0.7, 0.8
-        % cur_rho = (1-eta)*cur_rho + eta*new_rho;
+        cur_x = sqrt(cur_rho);
+        p_t = sum(cur_rho, 2);
         % fprintf('Log-Approx: %f at iter %d\n', cur_rate, iter);
 
     end
@@ -112,4 +188,45 @@ function [rate, rho_opt] = dl_isac_approx_sumrate(Gammaan, BETAAn, PhiPhi, P_max
 
     
         
+end
+
+
+function [sigma2, feasible] = local_sigma2(p, q_a, q_b, q_c, nu, eps_det)
+    sa = q_a' * p;
+    sb = q_b' * p;
+    sc = q_c' * p;
+    denom = sa * sb - sc^2;
+    if denom <= eps_det
+        sigma2 = Inf;
+        feasible = false;
+        return;
+    end
+    sigma2 = ((q_a + q_b)' * p) / denom;
+    feasible = isfinite(sigma2) && sigma2 <= nu * (1 + 1e-8);
+end
+
+
+function [p_init, feasible] = local_feasible_initial_power( ...
+        q_a, q_b, q_c, P_max, nu)
+    M = length(q_a);
+    cvx_begin quiet
+        cvx_solver mosek
+        variable p0(M)
+        variable W(2,2) symmetric
+        expression Fim(2,2)
+        Fim = [q_a' * p0, q_c' * p0; ...
+               q_c' * p0, q_b' * p0];
+        maximize(sum(p0))
+        subject to
+            0 <= p0 <= P_max
+            [Fim, eye(2); eye(2), W] == semidefinite(4)
+            trace(W) <= nu
+    cvx_end
+
+    feasible = contains(cvx_status, 'Solved');
+    if feasible
+        p_init = max(0, min(P_max, p0));
+    else
+        p_init = [];
+    end
 end

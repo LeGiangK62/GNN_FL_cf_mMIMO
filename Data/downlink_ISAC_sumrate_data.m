@@ -71,12 +71,12 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
             num_sam, num_ue, num_ap, num_sr, char(datetime('now')));
     
     for n = 1:N
-        %if mod(n, max(1, N/50)) == 1
-        %    fprintf('============== %d/%d ==============  at %s \n', ...
-        %            n, N, char(datetime('now')));
-        %end
-        fprintf('============== %d/%d ==============  at %s \n', ...
-                    n, N, char(datetime('now')));
+        if mod(n, max(1, N/50)) == 1
+           fprintf('============== %d/%d ==============  at %s \n', ...
+                   n, N, char(datetime('now')));
+        end
+        % fprintf('============== %d/%d ==============  at %s \n', ...
+        %             n, N, char(datetime('now')));
         
         %% =========== LOCATIONS AND GEOMETRY ===========
         
@@ -422,7 +422,6 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
         %     crlb_x = Inf;
         %     crlb_y = Inf;
         % end
-
         b = q_a + q_b;
         A = q_a * q_b' - q_c * q_c';
 
@@ -431,20 +430,22 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
         % 1) Equal Power Allocation (baseline)
         P_max = 1;
         rho_eq = (P_max / K) * ones(M, K);
-        kappa_eq = crlb_linear_check(rho_eq, b, A, nu);
-        rho_eq = rho_eq * kappa_eq;
+        % kappa_eq = crlb_linear_check(rho_eq, b, A, nu);
+        % rho_eq = rho_eq * kappa_eq;
         R_dl_equal = dl_rate_calculate(rho_eq, Gammaan, BETAAn, PhiPhi);
 
         
         % 2) Fractional Power Allocation
         theta = 1.0;
         rho_frac = dl_fractional_pa(BETAA, M, K, P_max, theta);
-        kappa_frac = crlb_linear_check(rho_frac, b, A, nu);
-        rho_frac = rho_frac * kappa_frac;
+        % kappa_frac = crlb_linear_check(rho_frac, b, A, nu);
+        % rho_frac = rho_frac * kappa_frac;
         R_dl_frac = dl_rate_calculate(rho_frac, Gammaan, BETAAn, PhiPhi);
         
         % 3) Logarithmic Approximation (simplified)
-        [R_dl_log, rho_log] = dl_approx_sumrate(Gammaan, BETAAn, PhiPhi, P_max);
+        [R_dl_log, rho_log] = dl_isac_approx_sumrate( ...
+            Gammaan, BETAAn, PhiPhi, P_max, q_a, q_b, q_c, nu);
+        % [R_dl_log, rho_log] = dl_approx_sumrate(Gammaan, BETAAn, PhiPhi, P_max);
         
         
         %% =========== SAVE RESULTS ===========

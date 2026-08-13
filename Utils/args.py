@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument('--num_sr', type=int, default=2, help="Number of sensing receivers")
     parser.add_argument('--num_tar', type=int, default=1, help="Number of sensing targets")
     parser.add_argument('--nu', type=float, default=1, help="Sensing resolution (m2)")
+    parser.add_argument('--crlb_lambda', type=float, default=1.0,
+                        help="Weight of the block-coordinate global CRLB surrogate in each client loss")
 
     
     # Hyperparameters
