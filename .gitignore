@@ -4,9 +4,23 @@ Data/*.mat
 Data/sumrate
 Data/*.pkl
 Data/Final
+Data/New
 .results
 
 Intructions
 .vscode
 .agents
 .claude
+
+# quantum-extension working dirs
+.otherCode
+.PhasePrompt
+.paper
+Quantum/results
+Quantum/checkpoints
+Quantum/scripts
+Quantum
+
+CLAUDE.md
+nvidia-bug-report.log.gz
+Quantum/configs/operating_point.json

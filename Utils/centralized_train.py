@@ -269,7 +269,10 @@ def cen_eval_sumrate(
 ## ISAC
 
 
-def cen_loss_function_isac_sumrate(graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_antenna, nu, epochRatio=1, eval_mode=False):
+def cen_loss_function_isac_sumrate(
+        graphData, nodeFeatDict, edgeDict, tau, rho_p, rho_d, num_antenna, nu,
+        epochRatio=1, eval_mode=False, crlb_lambda=1.0
+    ):
     num_graph = graphData.num_graphs
     criterion = nn.MSELoss(reduction='mean') 
     
@@ -328,7 +331,9 @@ def cen_loss_function_isac_sumrate(graphData, nodeFeatDict, edgeDict, tau, rho_p
         A = (q_a * q_b_T) - (q_c * q_c_T)
 
 
-        p_sens = torch.sum(power_matrix, dim=2)
+        # power_matrix stores sqrt(P_mk). The sensing power at AP m is
+        # P_sen,m = sum_k v_mk * P_mk.
+        p_sens = torch.sum(channel_var * power_matrix.square(), dim=2)
         p_sens_T = p_sens.unsqueeze(1)
         p_sens = p_sens.unsqueeze(-1)
         # CRLB and loss
@@ -339,14 +344,14 @@ def cen_loss_function_isac_sumrate(graphData, nodeFeatDict, edgeDict, tau, rho_p
 
         crlb_loss = torch.relu(crlb).squeeze(1,2)
       
-        loss = torch.mean(-sum_rate + crlb_loss)
+        loss = -sum_rate.mean() + crlb_lambda * crlb_loss.mean()
 
         return loss, torch.mean(sum_rate_detach.detach())
 
 def cen_train_isac_sumrate( epochRatio,
         dataLoader, model, optimizer,
         tau, rho_p, rho_d, num_antenna,
-        nu
+        nu, crlb_lambda=1.0
     ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.train()
@@ -363,7 +368,8 @@ def cen_train_isac_sumrate( epochRatio,
             batch, x_dict, edge_dict,
             tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
             nu=nu,
-            epochRatio=epochRatio
+            epochRatio=epochRatio,
+            crlb_lambda=crlb_lambda
         )
         loss.backward()
         optimizer.step()
@@ -401,5 +407,3 @@ def cen_eval_isac_sumrate(
         total_graphs += num_graph
 
     return total_min_rate/total_graphs 
-
-

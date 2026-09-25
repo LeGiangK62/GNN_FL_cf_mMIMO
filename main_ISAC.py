@@ -373,6 +373,7 @@ if __name__ == '__main__':
                             num_antenna=num_antenna, 
                             zeta=zeta, nu=nu,
                             alpha=args.alpha, round_ratio=round/num_rounds,
+                            crlb_lambda=args.crlb_lambda,
                         )
                     if hasattr(fed, 'update_client_control'):    
                         lr_current = opt.param_groups[0]['lr']
@@ -476,7 +477,7 @@ if __name__ == '__main__':
                 epoch/(2*num_epochs_cen//3),
                 train_loader_cen, cen_model, cen_optimizer,
                 tau=tau, rho_p=rho_p, rho_d=rho_d, num_antenna=num_antenna,
-                nu=nu
+                nu=nu, crlb_lambda=args.crlb_lambda
             )
             
             cen_model.eval()

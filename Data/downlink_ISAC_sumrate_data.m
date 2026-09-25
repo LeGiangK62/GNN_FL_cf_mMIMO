@@ -1,7 +1,7 @@
 function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, power_log, ...
           rcs_values, ap_locations, sr_locations, q_a_all, q_b_all, q_c_all] = downlink_ISAC_sumrate_data(...
           num_sam, num_ap, num_ue, num_sr, num_antenna, tau, power_f, ...
-          Hb, Hm, f, d0, d1, D, nu)
+          Hb, Hm, f, d0, d1, D, nu, solve_log_baseline)
 
     %% =====================================================================
     % DOWNLINK ISAC SUMRATE DATA GENERATION
@@ -16,6 +16,9 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
     M = num_ap;     % number of access points
     K = num_ue;     % number of user equipments
     T = num_sr;     % number of sensing receivers
+    if nargin < 16 || isempty(solve_log_baseline)
+        solve_log_baseline = true;
+    end
     
     % Pilot sequences
     [U, S, V] = svd(randn(tau, tau)); % U includes tau orthogonal sequences
@@ -429,8 +432,8 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
         
         % 1) Equal Power Allocation (baseline)
         P_max = 1;
-        rho_eq = (P_max / K) * ones(M, K);
-        % kappa_eq = crlb_linear_check(rho_eq, b, A, nu);
+        rho_eq = P_max ./ (K * Gammaan);
+        % kappa_eq = crlb_linear_check(rho_eq, Gammaan, b, A, nu);
         % rho_eq = rho_eq * kappa_eq;
         R_dl_equal = dl_rate_calculate(rho_eq, Gammaan, BETAAn, PhiPhi);
 
@@ -438,13 +441,18 @@ function [betas, gammas, phiis, R_equal, R_frac, R_log, power_eq, power_frac, po
         % 2) Fractional Power Allocation
         theta = 1.0;
         rho_frac = dl_fractional_pa(BETAA, M, K, P_max, theta);
-        % kappa_frac = crlb_linear_check(rho_frac, b, A, nu);
+        % kappa_frac = crlb_linear_check(rho_frac, Gammaan, b, A, nu);
         % rho_frac = rho_frac * kappa_frac;
         R_dl_frac = dl_rate_calculate(rho_frac, Gammaan, BETAAn, PhiPhi);
         
         % 3) Logarithmic Approximation (simplified)
-        [R_dl_log, rho_log] = dl_isac_approx_sumrate( ...
-            Gammaan, BETAAn, PhiPhi, P_max, q_a, q_b, q_c, nu);
+        if solve_log_baseline
+            [R_dl_log, rho_log] = dl_isac_approx_sumrate( ...
+                Gammaan, BETAAn, PhiPhi, P_max, q_a, q_b, q_c, nu);
+        else
+            R_dl_log = NaN;
+            rho_log = nan(M, K);
+        end
         % [R_dl_log, rho_log] = dl_approx_sumrate(Gammaan, BETAAn, PhiPhi, P_max);
         
         

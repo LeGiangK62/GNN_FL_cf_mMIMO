@@ -1,0 +1,7 @@
+The SCA procedure for the Log-approximation baseline is terminated after
+50 iterations. A 100-realization convergence study at K=6, M=30 showed the
+objective within a median 1.70% of its value at 60 iterations.
+
+Exact study figures (50 iterations relative to 60 iterations):
+median shortfall = 1.7035%; mean shortfall = 1.8651%;
+95th-percentile shortfall = 3.3480%; maximum shortfall = 4.7095%.

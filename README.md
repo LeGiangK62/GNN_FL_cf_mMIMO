@@ -129,6 +129,11 @@ python main_new.py  --num_train 500 --num_test 100 --num_eval 500  --num_ap 30 -
 ## Training
 python main_new.py  --num_train 500 --num_test 50 --num_eval 450   --tau 20 --power_f 0.2 --num_antenna 1  --hidden_channels 64 --num_gnn_layers 3  --num_rounds 100 --num_epochs 1 --batch_size 32 --lr 1e-4 --client_fraction 0.6  --fl_scheme fedavg  --param_free --no_kg --num_ap 100 --num_ue 15
 
+python main_new.py --client classical --num_train 256 --num_ue 6 --num_ap 30 --num_epochs 1 --lr 1e-4 \
+  --hidden_channels 64 --client_fraction 0.6 --param_free --batch_size 32 \
+  --q_k 3 --q_ap_qubits 2 --num_gnn_layers 2 --num_rounds 150 \
+  --q_ue_qubits 1 --q_edge_qubits 1 --q_reupload 2 --noKG_pretrain 26_08_27_10_00_52_fl --fl_pretrain 26_08_27_09_47_21_fl --cen_pretrain 26_08_27_09_47_21_cen
+
 ## --num_ap 30 --num_ue 6
 --fl_pretrain  26_06_29_14_21_57_fl
 --cen_pretrain 26_07_07_15_42_24_cen
@@ -196,3 +201,9 @@ python main_new.py  --num_train 1000 --num_test 100 --num_eval 500  --num_ap 30 
 --fl_pretrain   26_07_09_14_11_12_fl
 --cen_pretrain  26_07_09_14_11_12_cen
 --noKG_pretrain 26_07_09_14_11_14_fl
+
+
+
+```bash
+python main_new.py --client quantum --q_k 4 --q_ent_layers 2 --q_sample pilot --num_ap 30 --num_ue 6 --tau 20 --power_f 0.2 --num_antenna 1 --hidden_channels 64 --num_gnn_layers 3 --num_rounds 150 --num_epochs 1 --batch_size 32 --lr 1e-4 --client_fraction 0.6 --fl_scheme fedavg --param_free --num_train 500 --num_test 100 --num_eval 400 --seed 1712 --no_kg
+```

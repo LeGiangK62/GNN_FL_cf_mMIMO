@@ -195,14 +195,20 @@ if __name__ == "__main__":
     dim_dict = {"UE": tau, "AP": 2, "comm_edge": 2}
     out_channels = hidden_channels
 
-    global_model = ClientGNN(dim_dict, out_channels,
-                             num_layers=num_gnn_layers,
-                             hid_layers=hidden_channels // 2).to(device)
+    # Client model selection.  Default 'classical' is byte-for-byte the
+    # published path; the quantum variants live in Quantum/ and are only
+    # imported when requested, so this file still runs without pennylane.
+    from Quantum.models.factory import build_client, describe_client
+
+    def _new_client():
+        return build_client(args, dim_dict, out_channels,
+                            num_gnn_layers, hidden_channels // 2).to(device)
+
+    global_model = _new_client()
+    print("[client] " + describe_client(global_model, args))
     local_models, optimizers, schedulers = [], [], []
     for _ in range(M):
-        m = ClientGNN(dim_dict, out_channels,
-                      num_layers=num_gnn_layers,
-                      hid_layers=hidden_channels // 2).to(device)
+        m = _new_client()
         m.load_state_dict(global_model.state_dict())
         opt = torch.optim.AdamW(m.parameters(), lr=lr, weight_decay=1e-4)
         local_models.append(m)
@@ -225,6 +231,16 @@ if __name__ == "__main__":
     if args.fl_scheme == "fedprox":
         fed = FedProx(client_fraction=client_fraction, mu=args.mu)
         fed.set_global_weights(global_model)
+    elif getattr(args, "fl_share", "all") != "all":
+        # Partial federation: upload only a subset of the client tensors and
+        # keep the rest local/personalised.  With --fl_share quantum the
+        # uplink is the PQC (352 B) instead of the whole client (376 KB).
+        from Quantum.utils.partial_fl import PartialFedAvg, uplink_report
+        fed = PartialFedAvg(client_fraction=client_fraction, share=args.fl_share)
+        print(f"[fl] partial federation, share='{args.fl_share}'")
+        for mode, r in uplink_report(global_model).items():
+            print(f"     uplink/{mode:14s} {r['bytes']:>9d} B  "
+                  f"({r['KB']} KB, {r['reduction_x']}x)")
     else:
         fed = FedAvg(client_fraction=client_fraction)
 
@@ -245,13 +261,21 @@ if __name__ == "__main__":
                         tau, rho_d, num_antenna, comm_rounds, device,
                         ctde=args.ctde, lam=args.lam, use_kg=not args.no_kg,
                         num_epochs=args.num_epochs, nu=nu,
-                        crlb_lambda=args.crlb_lambda)
+                        crlb_lambda=args.crlb_lambda,
+                        crlb_gamma_weighted=args.crlb_gamma_weighted,
+                        crlb_ratio_hinge=args.crlb_ratio_hinge)
 
             global_weights = fed.aggregate(global_model, local_models, selected)
             global_model.load_state_dict(global_weights)
-            for m in local_models:
-                m.load_state_dict(global_model.state_dict())
-                
+            if hasattr(fed, "apply_to_clients"):
+                # partial federation: push down only the shared tensors so the
+                # clients keep their personalised classical parameters
+                fed.apply_to_clients(global_weights, local_models)
+            else:
+                for m in local_models:
+                    m.load_state_dict(global_model.state_dict())
+
+
             for ci in selected:
                 schedulers[ci].step()
             if server_sched is not None:
@@ -353,6 +377,14 @@ if __name__ == "__main__":
     # ---- evaluation (CDF) ----
     if args.eval_plot:
         print("Evaluation" + "=" * 20)
+        # Experiment E5: finite measurement shots at inference.  Training stays
+        # analytic (backprop through the statevector); only the evaluation
+        # QNode is swapped, so this isolates readout noise from optimisation.
+        if getattr(args, "q_shots", None):
+            print(f"[quantum] evaluating with {args.q_shots} shots")
+            for m in local_models:
+                if hasattr(m, "set_shots"):
+                    m.set_shots(args.q_shots)
         fl_rates = evaluate(eval_aps, eval_sens, M, server_model, local_models,
                             tau, rho_d, num_antenna, comm_rounds, device,
                             use_kg=not args.no_kg)
@@ -431,12 +463,16 @@ if __name__ == "__main__":
                 color='tab:blue',
                 linewidth=2, linestyle='--', 
         )
-        if args.noKG_pretrain is None:
-            plt.plot(pad(fl_rates), y_axis, label="KG-Fed-GNN", 
-                    color='tab:red',
-                    linewidth=2.5, linestyle='-', 
-            )
-        plt.plot(pad(no_kg_rates), y_axis, label="Fed-GNN", 
+        # if args.noKG_pretrain is None:
+        #     plt.plot(pad(fl_rates), y_axis, label="KG-Fed-GNN", 
+        #             color='tab:red',
+        #             linewidth=2.5, linestyle='-', 
+        #     )
+        plt.plot(pad(fl_rates), y_axis, label="KG-Fed-GNN", 
+                            color='tab:red',
+                            linewidth=2.5, linestyle='-', 
+                    )
+        plt.plot(pad(no_kg_rates), y_axis, label="Fed-GNN (no KG)", 
                 color='tab:orange',
                 linewidth=2, linestyle='-.', 
         )

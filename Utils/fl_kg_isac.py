@@ -387,17 +387,23 @@ def train_round(ap_loaders, sensing_loader, M, server_model, server_opt,
                 local_models, optimizers, selected, fed, global_model,
                 tau, rho_d, num_antenna, comm_rounds, device,
                 ctde=False, lam=0.2, use_kg=True, num_epochs=1,
-                nu=1.0, crlb_lambda=1.0):
+                nu=1.0, crlb_lambda=1.0, crlb_gamma_weighted=False,
+                crlb_ratio_hinge=False, return_crlb_diagnostics=False):
     """Compatibility entry point used by main_new.py -- runs the 3-phase round.
 
     FedAvg aggregation is performed by the caller (main_new.py) AFTER this
     returns, so it is intentionally NOT done here.
     """
-    train_round_new(ap_loaders, sensing_loader, M, server_model, server_opt,
-                    local_models, optimizers, selected,
-                    tau, rho_d, num_antenna, comm_rounds, device,
-                    ctde=ctde, lam=lam, use_kg=use_kg, num_epochs=num_epochs,
-                    nu=nu, crlb_lambda=crlb_lambda)
+    return train_round_new(
+        ap_loaders, sensing_loader, M, server_model, server_opt,
+        local_models, optimizers, selected,
+        tau, rho_d, num_antenna, comm_rounds, device,
+        ctde=ctde, lam=lam, use_kg=use_kg, num_epochs=num_epochs,
+        nu=nu, crlb_lambda=crlb_lambda,
+        crlb_gamma_weighted=crlb_gamma_weighted,
+        crlb_ratio_hinge=crlb_ratio_hinge,
+        return_crlb_diagnostics=return_crlb_diagnostics,
+    )
 
 
 @torch.no_grad()
@@ -509,7 +515,8 @@ def loss_function_new(client_batch, edge_attr_dict, tau, rho_d, num_antenna, kg,
     return loss
 
 
-def local_power_sensing_sum(client_batch, edge_attr_dict, num_antenna):
+def local_power_sensing_sum(client_batch, edge_attr_dict, num_antenna,
+                            gamma_weighted=False):
     """Return p_sen for a single-AP client, with gradients when applicable."""
     B = client_batch.num_graphs
     K = client_batch["UE"].x.shape[0] // B
@@ -517,10 +524,14 @@ def local_power_sensing_sum(client_batch, edge_attr_dict, num_antenna):
     channel_var = raw_edge[..., 1]
     power_raw = edge_attr_dict["AP", "comm_down", "UE"].reshape(B, 1, K, -1)[..., -1]
     sqrt_power = power_from_raw(power_raw, channel_var, num_antenna)
-    return sqrt_power.square().sum(dim=2).squeeze(1)
+    power = sqrt_power.square()
+    if gamma_weighted:
+        power = channel_var * power
+    return power.sum(dim=2).squeeze(1)
 
 
-def crlb_block_surrogate(current_p_sen, phase1_p_sen, q_all, client_idx, nu):
+def crlb_block_surrogate(current_p_sen, phase1_p_sen, q_all, client_idx, nu,
+                         ratio_hinge=False):
     """Global CRLB hinge with other AP powers fixed to detached phase-1 values.
 
     This is a block-coordinate surrogate: only ``current_p_sen`` carries a
@@ -532,7 +543,14 @@ def crlb_block_surrogate(current_p_sen, phase1_p_sen, q_all, client_idx, nu):
     sa = (qa * other_p).sum(dim=1) + qa[:, client_idx] * current_p_sen
     sb = (qb * other_p).sum(dim=1) + qb[:, client_idx] * current_p_sen
     sc = (qc * other_p).sum(dim=1) + qc[:, client_idx] * current_p_sen
-    violation = sa + sb - nu * (sa * sb - sc.square())
+    determinant = sa * sb - sc.square()
+    if ratio_hinge:
+        # Machine epsilon prevents an overflow-prone division near zero without
+        # changing the ratio or its monotonic gradient in the measured range.
+        determinant = determinant.clamp_min(torch.finfo(determinant.dtype).eps)
+        violation = (sa + sb) / determinant - nu
+    else:
+        violation = sa + sb - nu * determinant
     return torch.relu(violation).mean()
 
 def train_round_old(ap_loaders, sensing_loader, M, server_model, server_opt,
@@ -707,12 +725,15 @@ def train_round_new(
         local_models, optimizers, selected,
         tau, rho_d, num_antenna, comm_rounds, device,
         ctde=False, lam=0.2, use_kg=True, num_epochs=1,
-        nu=1.0, crlb_lambda=1.0
+        nu=1.0, crlb_lambda=1.0, crlb_gamma_weighted=False,
+        crlb_ratio_hinge=False, return_crlb_diagnostics=False
     ):
     for m in local_models:
         m.train()
     server_model.train()
 
+    crlb_max = 0.0
+    crlb_ever_nonzero = False
     for batch_tuple in zip(*ap_loaders, sensing_loader):
         client_batches = [b.to(device) for b in batch_tuple[:M]]
         server_b = batch_tuple[M].to(device)        
@@ -733,7 +754,10 @@ def train_round_new(
                 dim=2
             )
             phase1_p_sen = torch.stack([
-                local_power_sensing_sum(b, o[1], num_antenna)
+                local_power_sensing_sum(
+                    b, o[1], num_antenna,
+                    gamma_weighted=crlb_gamma_weighted,
+                )
                 for b, o in zip(client_batches, outs)
             ], dim=1)
             q_all = server_b["AP"].q_raw.view(server_b.num_graphs, M, 3)
@@ -777,9 +801,11 @@ def train_round_new(
                     _, edge_attr_dict, _ = local_models[ci](
                         client_batches[ci], kg_emb=gap_ci, kg_attn=attn_ci)
                     current_p_sen = local_power_sensing_sum(
-                        client_batches[ci], edge_attr_dict, num_antenna)
+                        client_batches[ci], edge_attr_dict, num_antenna,
+                        gamma_weighted=crlb_gamma_weighted)
                     crlb_loss = crlb_block_surrogate(
-                        current_p_sen, phase1_p_sen, q_all, ci, nu)
+                        current_p_sen, phase1_p_sen, q_all, ci, nu,
+                        ratio_hinge=crlb_ratio_hinge)
                     loss = loss_function_new(client_batches[ci], edge_attr_dict,
                                             tau, rho_d, num_antenna, kg=ci_ap,
                                             crlb_loss=crlb_loss,
@@ -791,10 +817,16 @@ def train_round_new(
                     loss = loss_function_old(client_batches[ci], edge_attr_dict,
                                             tau, rho_d, num_antenna)
                     current_p_sen = local_power_sensing_sum(
-                        client_batches[ci], edge_attr_dict, num_antenna)
+                        client_batches[ci], edge_attr_dict, num_antenna,
+                        gamma_weighted=crlb_gamma_weighted)
                     crlb_loss = crlb_block_surrogate(
-                        current_p_sen, phase1_p_sen, q_all, ci, nu)
+                        current_p_sen, phase1_p_sen, q_all, ci, nu,
+                        ratio_hinge=crlb_ratio_hinge)
                     loss = loss + crlb_lambda * crlb_loss
+                if return_crlb_diagnostics:
+                    crlb_value = float(crlb_loss.detach())
+                    crlb_max = max(crlb_max, crlb_value)
+                    crlb_ever_nonzero = crlb_ever_nonzero or crlb_value > 0.0
                 loss.backward()
 
 
@@ -805,6 +837,10 @@ def train_round_new(
         for ci in selected:
             torch.nn.utils.clip_grad_norm_(local_models[ci].parameters(), 1.0)
             optimizers[ci].step()
+
+    if return_crlb_diagnostics:
+        return {"ever_nonzero": crlb_ever_nonzero, "max": crlb_max}
+    return None
 
 
 @torch.no_grad()

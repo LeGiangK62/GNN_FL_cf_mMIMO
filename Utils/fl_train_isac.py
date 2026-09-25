@@ -16,8 +16,12 @@ from Utils.comm import (
 
 ## ISAC
 
-def sensing_component(power_matrix, q_a, q_b, q_c):
-    p_sens = torch.sum(power_matrix, dim=2, keepdim=True)
+def sensing_component(power_matrix, channel_variance, q_a, q_b, q_c):
+    # power_matrix stores sqrt(P_mk). The sensing power at AP m is
+    # P_sen,m = sum_k v_mk * P_mk.
+    p_sens = torch.sum(
+        channel_variance * power_matrix.square(), dim=2, keepdim=True
+    )
     S_a = q_a * p_sens
     S_b = q_b * p_sens
     S_c = q_c * p_sens
@@ -30,7 +34,8 @@ def loss_function_isac_sumrate(
         clientResponse, bottleneckIndicator, 
         tau, rho_p, rho_d, num_antenna, 
         zeta, nu,
-        round_ratio=0, alpha=None, responsibility=None, isTrain=True
+        round_ratio=0, alpha=None, responsibility=None, isTrain=True,
+        crlb_lambda=1.0
     ):
     """
     Compute loss for FL training.
@@ -70,7 +75,9 @@ def loss_function_isac_sumrate(
     q_b = graphData['AP'].x[:,3:4].reshape(num_graphs, num_APs, -1)
     q_c = graphData['AP'].x[:,4:5].reshape(num_graphs, num_APs, -1)
 
-    Sa_k, Sb_k, Sc_k = sensing_component(power_matrix, q_a, q_b, q_c)
+    Sa_k, Sb_k, Sc_k = sensing_component(
+        power_matrix, channel_variance, q_a, q_b, q_c
+    )
 
 
 
@@ -130,7 +137,7 @@ def loss_function_isac_sumrate(
 
     loss = -(weight * DS_k).sum(dim=1).mean() \
             + (alpha * weight * local_interf_per_ue).sum(dim=1).mean() \
-            + crlb_loss.mean()
+            + crlb_lambda * crlb_loss.mean()
 
 
     return loss, sum_rate_detach
@@ -141,7 +148,7 @@ def fl_train_isac_sumrate(
         dataLoader, responseInfo, globalRates, interferences, model, optimizer,
         tau, rho_p, rho_d, num_antenna, 
         zeta, nu,
-        round_ratio=0, alpha=None
+        round_ratio=0, alpha=None, crlb_lambda=1.0
 ):
     """
     Train a local FL model for one epoch.
@@ -175,6 +182,7 @@ def fl_train_isac_sumrate(
             zeta=zeta, nu=nu,
             round_ratio=round_ratio, alpha=alpha,
             responsibility=interference,
+            crlb_lambda=crlb_lambda,
         )
 
         loss.backward()
@@ -688,7 +696,9 @@ def get_global_info_isac(
                 q_b = batch['AP'].x[:,3:4].reshape(num_graphs, num_APs, -1)
                 q_c = batch['AP'].x[:,4:5].reshape(num_graphs, num_APs, -1)
 
-                Sa_k, Sb_k, Sc_k = sensing_component(power, q_a, q_b, q_c)
+                Sa_k, Sb_k, Sc_k = sensing_component(
+                    power, channelVariance, q_a, q_b, q_c
+                )
                 ##
             send_to_server[client_idx].append({
                 ### rate pack
@@ -780,7 +790,9 @@ def get_global_info_isac_2nd(
                 q_b = batch['AP'].x[:,3:4].reshape(num_graphs, num_APs, -1)
                 q_c = batch['AP'].x[:,4:5].reshape(num_graphs, num_APs, -1)
 
-                Sa_k, Sb_k, Sc_k = sensing_component(power, q_a, q_b, q_c)
+                Sa_k, Sb_k, Sc_k = sensing_component(
+                    power, channelVariance, q_a, q_b, q_c
+                )
 
             send_to_server[client_idx].append({
                 'DS': DS_single.detach(),

@@ -30,6 +30,14 @@ def parse_args():
     parser.add_argument('--nu', type=float, default=1, help="Sensing resolution (m2)")
     parser.add_argument('--crlb_lambda', type=float, default=1.0,
                         help="Weight of the block-coordinate global CRLB surrogate in each client loss")
+    parser.add_argument('--crlb_gamma_weighted', action='store_true', default=False,
+                        help="Use Eq. (7) sensing power sum_k Gamma_mk P_mk in "
+                             "the CRLB training surrogate. Off preserves the "
+                             "published sum_k P_mk path.")
+    parser.add_argument('--crlb_ratio_hinge', action='store_true', default=False,
+                        help="Penalize relu(sigma2_xy - nu) instead of the "
+                             "cleared-denominator CRLB expression. Off preserves "
+                             "the published surrogate.")
 
     
     # Hyperparameters
@@ -75,11 +83,148 @@ def parse_args():
     parser.add_argument('--num_gnn_layers', type=int, default=4, help="Number of GNN layers")
 
 
-    # Quantum Parameters
+    # Quantum Parameters (legacy path: main_sumrate_qml.py / Models/qml.py)
     parser.add_argument('--n_qubits', type=int, default=5, help="Number of quantum bit (qubits)")
     parser.add_argument('--n_layers', type=int, default=2, help="Number of hidden channels for Quantum layers")
     parser.add_argument('--q_dev', type=str, default="default.qubit", help="Number of GNN layers")
-    
+
+    # ---- Quantum star-subgraph client (Quantum/, see CLAUDE.md) ----
+    parser.add_argument('--client', type=str,
+                        choices=['classical', 'quantum', 'star', 'qgnn', 'qgnn_c',
+                                 'sqgnn', 'sqgnn_c'],
+                        default='classical',
+                        help="Client model. 'classical' = Models.KG_models.ClientGNN "
+                             "(reproduces the published results, default). "
+                             "'quantum' = Quantum.models.qclient.QClientGNN (PQC star "
+                             "message passing). 'star' = baseline B2, same fixed-k star "
+                             "topology with a classical aggregator. 'qgnn' = "
+                             "Quantum.models.qgnn_client.ClientQGNN: two-directional "
+                             "quantum message passing with NO APConvLayer at all. "
+                             "'qgnn_c' = its baseline B2', same topology and same angle "
+                             "bottleneck with MLP cores. 'sqgnn' partitions all UEs "
+                             "into disjoint fixed-k quantum subsets; 'sqgnn_c' is "
+                             "its classical-core twin.")
+    parser.add_argument('--sq_k', type=int, default=4,
+                        help="UEs per disjoint subset; circuit width is 2k+1.")
+    parser.add_argument('--sq_reupload', type=int, default=1,
+                        help="Data re-upload blocks in each subset circuit, with "
+                             "independent weights per upload.")
+    parser.add_argument('--sq_agg', type=str, choices=['sum', 'mean'],
+                        default='sum',
+                        help="Aggregate per-subset AP readouts by sum or mean.")
+    parser.add_argument('--sq_pad_flag', dest='sq_pad_flag',
+                        action='store_true', default=True,
+                        help="Encode +1 for real slots and -1 for padding (default).")
+    parser.add_argument('--sq_no_pad_flag', dest='sq_pad_flag',
+                        action='store_false',
+                        help="Disable the explicit padding-slot marker.")
+    parser.add_argument('--sq_ent_layers', type=int, default=2,
+                        help="Entangling layers per subset-circuit block.")
+    parser.add_argument('--q_k', type=int, default=4,
+                        help="Star size: number of sampled UE neighbours. Circuit "
+                             "width is 2k+2 wires and is independent of K.")
+    parser.add_argument('--q_ent_layers', type=int, default=2,
+                        help="Entangling layers L inside U_MSG / U_AGG")
+    parser.add_argument('--q_layers', type=int, default=1,
+                        help="Number of stacked quantum star layers")
+    parser.add_argument('--q_msg_mode', type=str, choices=['pair', 'star'],
+                        default='pair',
+                        help="'pair' = paper-faithful (centre register untouched during "
+                             "U_MSG). 'star' = ablation letting U_MSG see the centre.")
+    parser.add_argument('--q_no_entangle', action='store_true', default=False,
+                        help="Ablation B3: remove CRX/CNOT, keep the parameter count.")
+    parser.add_argument('--q_share_update', action='store_true', default=False,
+                        help="Share U_AGG weights across neighbour slots.")
+    parser.add_argument('--q_sample', type=str,
+                        choices=['pilot', 'importance', 'topk', 'uniform'],
+                        default='pilot',
+                        help="Star sampling policy (ablation S0-S3). 'uniform'=S0 "
+                             "(QGNN_Comm reference), 'topk'=S1, 'importance'=S2 "
+                             "(P proportional to beta), 'pilot'=S3 (cover distinct "
+                             "pilot groups first, then strongest contaminators). "
+                             "Stochastic policies are deterministic at eval.")
+    parser.add_argument('--fl_share', type=str,
+                        choices=['all', 'quantum', 'quantum_head', 'classical_core'],
+                        default='all',
+                        help="Which client tensors are federated. 'all' = standard "
+                             "FedAvg (published behaviour). 'quantum' = only the PQC "
+                             "angles are uploaded; classical encoders/heads stay "
+                             "local and personalised, cutting per-round uplink by "
+                             "~1300x. 'classical_core' is the size-matched control.")
+    parser.add_argument('--uplink_topk', type=float, default=None,
+                        help="Baseline B4: top-k magnitude sparsification fraction "
+                             "of the uploaded delta (e.g. 0.01).")
+    parser.add_argument('--uplink_bits', type=int, default=None,
+                        help="Baseline B4: uniform quantisation bit-width of the "
+                             "uploaded delta (e.g. 8).")
+    parser.add_argument('--q_relaxed_invariance', action='store_true', default=False,
+                        help="Restore the classical UE->AP post layers, breaking exact "
+                             "UE-count invariance (ablation).")
+    parser.add_argument('--q_interleave', action='store_true', default=False,
+                        help="Apply one masked star layer before EVERY classical "
+                             "AP->UE layer instead of once up front. Off by default: "
+                             "diagnostic run H reaches 10.91 bit/s/Hz with a single "
+                             "UE->AP layer, so the extra layers cost PQC evaluations "
+                             "for no demonstrated benefit.")
+    parser.add_argument('--q_no_interleave', action='store_true', default=False,
+                        help=argparse.SUPPRESS)   # deprecated; interleaving is now opt-in
+    parser.add_argument('--q_no_mag_channel', action='store_true', default=False,
+                        help="Drop the raw-edge-attribute path around the circuit. "
+                             "PQC expectation values are bounded in [-1,1], so this "
+                             "tests whether a purely quantum message is magnitude-blind "
+                             "-- the failure mode measured in run I2 (mean-pooling "
+                             "collapses, sum trains). Mirrored on --client star.")
+    parser.add_argument('--q_ap_qubits', type=int, default=2,
+                        help="AP wires in the AP->UE circuit (--client qgnn/qgnn_c). "
+                             "The AP is the broadcast SOURCE there, so 1 qubit (2 "
+                             "angles) is the tightest bottleneck in the model; 2 "
+                             "doubles that channel for ~0.2 h per 150-round run.")
+    parser.add_argument('--q_ue_qubits', type=int, default=2,
+                        help="Qubits carrying the UE embedding in the AP->UE "
+                             "circuit (2 angles each). The measured bottleneck of "
+                             "the 1-qubit version was per-UE bandwidth into the "
+                             "circuit, which set the whole convergence time.")
+    parser.add_argument('--q_edge_qubits', type=int, default=2,
+                        help="Qubits carrying the edge attribute in the AP->UE "
+                             "circuit (2 angles each).")
+    parser.add_argument('--q_reupload', type=int, default=1,
+                        help="Data re-uploading blocks in the AP->UE circuit. A "
+                             "Pauli encoding used once gives a degree-1 "
+                             "trigonometric polynomial in the input; R uploads "
+                             "reach degree R. Each block has its own parameters. "
+                             "Cost is linear in R, not exponential.")
+    parser.add_argument('--q_share_dirs', type=str, default='none',
+                        choices=['none', 'msg', 'all'],
+                        help="Share circuit parameters between the UE->AP and AP->UE "
+                             "directions. 'msg' shares the (edge,neighbour) ladder "
+                             "only; 'all' shares the aggregation block too. Shapes "
+                             "match in both directions by construction, so every "
+                             "mode is legal.")
+    parser.add_argument('--zero_init_power', action='store_true', default=False,
+                        help="Zero-initialise the final Linear of the power head, so "
+                             "every AP starts at sum_k r_mk = 0 and the activation "
+                             "sigma(sum_k r_mk) starts at 0.5. Off by default; the "
+                             "published path is unaffected. Motivation: the activation "
+                             "admits a degenerate zero-power solution whose gradient "
+                             "sigma(1-sigma) vanishes, and the fixed-size clients fall "
+                             "into it within ~15 rounds at K=15. Applies to every "
+                             "client kind, so it must be enabled for all arms or none.")
+    parser.add_argument('--q_msg_plain', action='store_true', default=False,
+                        help="Control B2a (--client star only): keep APConvLayer's stock "
+                             "message MLP inside the masked layer, i.e. ask whether edge "
+                             "masking alone trains, before any bottleneck is imposed.")
+    parser.add_argument('--q_bottleneck', type=int, default=2,
+                        help="Features per neighbour slot entering the aggregator. "
+                             "2 = the quantum geometry (RY,RZ on one qubit). Only "
+                             "--client star can exceed it; used to test whether the "
+                             "bottleneck, not the aggregator, is what limits the model.")
+    parser.add_argument('--q_readout', type=int, default=4,
+                        help="Aggregator output width. 4 = the quantum readout "
+                             "(<Z>,<X> on centre and ancilla).")
+    parser.add_argument('--q_shots', type=int, default=None,
+                        help="Finite measurement shots at EVALUATION (experiment E5). "
+                             "Default None = analytic expectation values.")
+
     # Seed for reproducibility
     parser.add_argument('--seed', type=int, default=1712, help="Random seed")
 
